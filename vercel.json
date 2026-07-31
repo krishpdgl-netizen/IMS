@@ -10,8 +10,5 @@
     { "src": "/api/(.*)", "dest": "main.py" },
     { "src": "/$", "dest": "/index.html" },
     { "src": "/(.*\\.(html|css|js))$", "dest": "/$1" }
-  ],
-  "functions": {
-    "main.py": { "maxDuration": 30 }
-  }
+  ]
 }
