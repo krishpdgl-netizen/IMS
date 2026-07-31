@@ -72,17 +72,17 @@ from pydantic import BaseModel
 # ============================================================================
 # SETTINGS
 # ============================================================================
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
-EXCEL_PATH = os.environ.get("EXCEL_PATH", "data/inventory_data.xlsx")
-ACCESS_CODE = os.environ.get("ACCESS_CODE", "inventory2026")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or ""
+GITHUB_REPO = os.environ.get("GITHUB_REPO") or ""
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH") or "main"
+EXCEL_PATH = os.environ.get("EXCEL_PATH") or "data/inventory_data.xlsx"
+ACCESS_CODE = os.environ.get("ACCESS_CODE") or "inventory2026"
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or ""
 GEMINI_MODEL = "gemini-3.1-flash-lite"  # fixed per requirements - do not swap models
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-AGING_THRESHOLD_DAYS = int(os.environ.get("AGING_THRESHOLD_DAYS", "90"))
+AGING_THRESHOLD_DAYS = int(os.environ.get("AGING_THRESHOLD_DAYS") or "90")
 
 GITHUB_API = "https://api.github.com"
 GH_HEADERS = {
@@ -427,7 +427,11 @@ fences, no commentary) matching exactly one of these shapes:
   "to_location": "<name>",         // required for TRANSFER only
   "quantity": <number>,             // for ADJUST, positive = found extra stock, negative = write-off/loss/damage
   "unit": "<e.g. units, boxes, kg>",
-  "date_received": "YYYY-MM-DD"     // only for RECEIVE; the date stock arrived. Use today if not stated.
+  "date_received": "YYYY-MM-DD"     // only for RECEIVE. ONLY fill this in if the
+                                     // message explicitly states a date (e.g. "received on
+                                     // 3rd May", "arrived last Monday"). If no date is
+                                     // mentioned, leave this field out entirely / null -
+                                     // do NOT guess or default to today yourself.
 }}
 
 2) Stock question ("how much do we have", "where is it kept", "what do we have in X location"):
@@ -445,6 +449,9 @@ fences, no commentary) matching exactly one of these shapes:
 }}
 
 RULES:
+- TODAY'S ACTUAL DATE IS: {today}. If the message states a relative date
+  ("yesterday", "last Monday", "3 days ago"), resolve it against this real
+  date - never against your own guess of what today is.
 - KNOWN PRODUCTS SO FAR: {known_products}
 - KNOWN LOCATIONS SO FAR: {known_locations}
 - If the message clearly refers to a product/location that closely matches
@@ -473,6 +480,7 @@ Return ONLY the JSON object, nothing else.
         if not GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY is not set on the server.")
         system_prompt = cls.SYSTEM_TEMPLATE.format(
+            today=date.today().isoformat(),
             known_products=", ".join(known_products) or "(none yet)",
             known_locations=", ".join(known_locations) or "(none yet)",
         )
