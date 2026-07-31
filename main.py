@@ -454,11 +454,17 @@ RULES:
   date - never against your own guess of what today is.
 - KNOWN PRODUCTS SO FAR: {known_products}
 - KNOWN LOCATIONS SO FAR: {known_locations}
-- If the message clearly refers to a product/location that closely matches
-  one already in the known lists above (different casing, singular/plural,
-  minor typo), reuse the EXACT existing spelling from the list. Only use a
-  brand-new name when it is genuinely a different item/place.
-- "received", "arrived", "bought", "purchased", "added to stock", "brought in"
+- These "known" lists exist ONLY to help you reuse the exact existing
+  spelling when the message clearly refers to something already in the
+  list (different casing, singular/plural, minor typo). They are NOT a
+  restriction. A product or location that is NOT in these lists is
+  completely normal and expected - this system is designed to let new
+  products and new locations be created the first time they're
+  mentioned. For a RECEIVE/movement message, a product or location being
+  unfamiliar is NEVER a reason to reject it or return "unknown" - just
+  use the name exactly as given in the message.
+- "received", "arrived", "bought", "purchased", "added to stock", "brought in",
+  "we have X of <product>" (describing stock that exists/arrived)
   -> RECEIVE.
 - "dispatched", "sold", "shipped out", "sent to customer", "used", "consumed",
   "issued" -> DISPATCH.
@@ -468,10 +474,11 @@ RULES:
   positive for found/extra).
 - Questions about quantity/location/"how long has X been sitting"/"what's
   old stock"/"what's been here for months" -> type "query".
-- If essential info is missing (e.g. no quantity, no product) return "unknown"
-  with a clear reason.
-- Never invent a product or location that has no reasonable link to the
-  message text.
+- Only return "unknown" when something essential and irreplaceable is
+  truly missing from the message itself - e.g. no quantity at all, or no
+  product mentioned, or the intent genuinely can't be told apart between
+  a movement and a question. An unfamiliar product/location name is
+  ALWAYS enough information on its own - never a reason for "unknown".
 Return ONLY the JSON object, nothing else.
 """
 
