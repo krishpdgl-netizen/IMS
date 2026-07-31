@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Warehouse Assistant | Inventory Management System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">📦 Inventory<span>MS</span></div>
+        <div class="menu">
+            <a href="dashboard.html">Dashboard</a>
+            <a href="assistant.html" class="active">AI Warehouse Assistant</a>
+            <a href="reports.html">Reports</a>
+        </div>
+        <div class="sidebar-footer">Powered by Gemini<br>Every reply is grounded in the live ledger — the AI never guesses a quantity.</div>
+    </div>
+
+    <div class="main">
+        <div class="header">
+            <h1>AI Warehouse Assistant</h1>
+            <div class="header-actions">
+                <button class="logout-btn" id="undoBtn">↶ Undo last</button>
+                <div class="profile" id="profileName">—</div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="section" style="padding:20px 24px;">
+            <div class="chat-hints">
+                <button class="chat-hint" data-msg="received 200 units of Dell Laptop in Mumbai Warehouse">Log a delivery</button>
+                <button class="chat-hint" data-msg="dispatched 50 Dell Laptop from Mumbai Warehouse">Log a dispatch</button>
+                <button class="chat-hint" data-msg="moved 30 Dell Laptop from Mumbai Warehouse to Delhi Warehouse">Log a transfer</button>
+                <button class="chat-hint" data-msg="how much Dell Laptop do we have and where is it kept?">Ask stock levels</button>
+                <button class="chat-hint" data-msg="what's been sitting in stock for too long?">Ask about aging stock</button>
+            </div>
+
+            <div class="chat-wrap">
+                <div class="chat-log" id="chatLog">
+                    <div class="msg bot">Hi! Tell me about a delivery, dispatch, transfer, or stock correction — or just ask
+                        me how much of something you have and where it's kept.</div>
+                </div>
+                <form class="chat-input-row" id="chatForm">
+                    <input type="text" id="chatInput" placeholder="e.g. received 500 boxes of A4 paper in Delhi Warehouse" autocomplete="off" required>
+                    <button type="submit" id="sendBtn">Send</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        requireLogin();
+        document.getElementById("profileName").textContent = localStorage.getItem("userName");
+
+        const chatLog = document.getElementById("chatLog");
+        const chatForm = document.getElementById("chatForm");
+        const chatInput = document.getElementById("chatInput");
+        const sendBtn = document.getElementById("sendBtn");
+
+        function addMsg(text, who, extraClass) {
+            const div = document.createElement("div");
+            div.className = `msg ${who}${extraClass ? " " + extraClass : ""}`;
+            div.textContent = text;
+            chatLog.appendChild(div);
+            chatLog.scrollTop = chatLog.scrollHeight;
+            return div;
+        }
+
+        async function sendMessage(text) {
+            addMsg(text, "user");
+            chatInput.value = "";
+            sendBtn.disabled = true;
+            const thinking = addMsg("Thinking…", "bot");
+            try {
+                const res = await apiPost("/api/chat", { message: text, entered_by: localStorage.getItem("userName") });
+                thinking.remove();
+                if (res.success === false) {
+                    addMsg(res.message || "Sorry, I couldn't process that.", "bot", "error");
+                } else if (res.type === "query") {
+                    addMsg(res.message, "bot");
+                } else {
+                    addMsg(res.message, "bot", "applied");
+                }
+            } catch (err) {
+                thinking.remove();
+                addMsg("Could not reach the server: " + err.message, "bot", "error");
+            } finally {
+                sendBtn.disabled = false;
+                chatInput.focus();
+            }
+        }
+
+        chatForm.addEventListener("submit", (e) => {
+            e.preventDefault();
+            const text = chatInput.value.trim();
+            if (!text) return;
+            sendMessage(text);
+        });
+
+        document.querySelectorAll(".chat-hint").forEach(btn => {
+            btn.addEventListener("click", () => sendMessage(btn.dataset.msg));
+        });
+
+        document.getElementById("undoBtn").addEventListener("click", async () => {
+            try {
+                const res = await apiPost("/api/undo", {});
+                showToast(`Reversed: ${res.reversed.action} — ${res.reversed.product}`);
+                addMsg(`Undone the last applied transaction (${res.reversed.action} — ${res.reversed.product}).`, "bot");
+            } catch (err) {
+                showToast("Nothing to undo: " + err.message);
+            }
+        });
+    </script>
+</body>
+</html>

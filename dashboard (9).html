@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | Inventory Management System</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="chart.umd.js"></script>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">📦 Inventory<span>MS</span></div>
+        <div class="menu">
+            <a href="dashboard.html" class="active">Dashboard</a>
+            <a href="assistant.html">AI Warehouse Assistant</a>
+            <a href="reports.html">Reports</a>
+        </div>
+        <div class="sidebar-footer">Data source: GitHub repo Excel file<br>File: inventory_data.xlsx</div>
+    </div>
+
+    <div class="main">
+        <div class="header">
+            <h1>Inventory Dashboard</h1>
+            <div class="header-actions">
+                <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
+                <div class="profile" id="profileName">—</div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="cards" id="cards">
+            <div class="card"><h2>—</h2><p>Loading…</p></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 3fr 2fr; gap:20px;">
+            <div class="section" style="margin:0;">
+                <div class="section-header">
+                    <h2>Stock by Location</h2>
+                </div>
+                <div style="position:relative; height:280px;">
+                    <canvas id="locationChart"></canvas>
+                </div>
+                <p id="locationEmpty" style="display:none;" class="empty-note">
+                    No stock recorded yet — use the AI Warehouse Assistant to log your first delivery.
+                </p>
+            </div>
+            <div class="section" style="margin:0;">
+                <div class="section-header">
+                    <h2>Aging Stock (3+ months)</h2>
+                    <a href="reports.html" style="font-size:12.5px; color:#0f766e; font-weight:600;">View all →</a>
+                </div>
+                <div id="agingList"></div>
+                <p id="agingEmpty" style="display:none;" class="empty-note">Nothing has been sitting too long. All clear.</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Get Started</h2>
+            </div>
+            <p style="color:#374151; line-height:1.7; font-size:14px;">
+                Use the <b>AI Warehouse Assistant</b> to record stock movements in plain English — e.g.
+                "received 200 units of Dell Laptop in Mumbai Warehouse" or "dispatched 50 Dell Laptop
+                from Mumbai Warehouse" — and the ledger updates automatically. Stock is tracked batch
+                by batch (FIFO), so the oldest stock is always used first and anything sitting around
+                for more than three months shows up here as an aging alert. You can also just ask
+                things like "how much Dell Laptop do we have and where is it kept?" and the assistant
+                will answer straight from the live ledger. The full workbook is always downloadable
+                as <b>inventory_report.xlsx</b> above.
+            </p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        requireLogin();
+        document.getElementById("profileName").textContent = localStorage.getItem("userName");
+
+        function waitForChart(timeoutMs = 4000) {
+            return new Promise((resolve, reject) => {
+                if (typeof Chart !== "undefined") return resolve();
+                const start = Date.now();
+                const iv = setInterval(() => {
+                    if (typeof Chart !== "undefined") { clearInterval(iv); resolve(); }
+                    else if (Date.now() - start > timeoutMs) { clearInterval(iv); reject(new Error("Chart.js failed to load.")); }
+                }, 100);
+            });
+        }
+
+        async function loadCards() {
+            const data = await apiGet("/api/dashboard-summary");
+            const s = data.summary;
+            document.getElementById("cards").innerHTML = `
+                <div class="card green">
+                    <h2>${s.total_products}</h2>
+                    <p>Distinct Products</p>
+                </div>
+                <div class="card">
+                    <h2>${fmtQty(s.total_quantity)}</h2>
+                    <p>Total Quantity In Stock</p>
+                </div>
+                <div class="card">
+                    <h2>${s.total_locations}</h2>
+                    <p>Locations</p>
+                </div>
+                <div class="card">
+                    <h2>${s.active_batches}</h2>
+                    <p>Active Batches</p>
+                </div>
+                <div class="card ${s.aging_alerts > 0 ? 'amber' : ''}">
+                    <h2>${s.aging_alerts}</h2>
+                    <p>Aging Alerts (${s.aging_threshold_days}+ days)</p>
+                </div>
+            `;
+        }
+
+        async function loadLocationChart() {
+            try {
+                await waitForChart();
+                const data = await apiGet("/api/stock-by-location");
+                const locs = data.locations || [];
+                if (!locs.length) { document.getElementById("locationEmpty").style.display = "block"; return; }
+                if (window._locChartInstance) window._locChartInstance.destroy();
+                window._locChartInstance = new Chart(document.getElementById("locationChart").getContext("2d"), {
+                    type: "bar",
+                    data: {
+                        labels: locs.map(l => l.location),
+                        datasets: [{ label: "Quantity in stock", data: locs.map(l => l.quantity),
+                                     backgroundColor: "#14968a", borderRadius: 6 }],
+                    },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { y: { beginAtZero: true } },
+                    },
+                });
+            } catch (e) {
+                console.error("Location chart failed:", e);
+                document.getElementById("locationEmpty").style.display = "block";
+            }
+        }
+
+        async function loadAgingList() {
+            const data = await apiGet("/api/aging-report");
+            const rows = data.batches || [];
+            if (!rows.length) { document.getElementById("agingEmpty").style.display = "block"; return; }
+            const top = rows.slice(0, 6);
+            document.getElementById("agingList").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Product</th><th>Location</th><th>Qty</th><th>Age</th></tr></thead>
+                    <tbody>
+                        ${top.map(r => `
+                            <tr>
+                                <td>${r.Product}</td>
+                                <td>${r.Location}</td>
+                                <td>${fmtQty(r["Qty Remaining"])} ${r.Unit || ""}</td>
+                                <td>${agingPill(r["Age Days"], data.threshold_days)}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        (async () => {
+            try {
+                const urlRes = await apiGet("/api/download-url");
+                document.getElementById("downloadBtn").href = API_BASE + "/api/download";
+            } catch (e) { /* ignore */ }
+            await loadCards();
+            await loadLocationChart();
+            await loadAgingList();
+        })();
+    </script>
+</body>
+</html>

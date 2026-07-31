@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports | Inventory Management System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">📦 Inventory<span>MS</span></div>
+        <div class="menu">
+            <a href="dashboard.html">Dashboard</a>
+            <a href="assistant.html">AI Warehouse Assistant</a>
+            <a href="reports.html" class="active">Reports</a>
+        </div>
+        <div class="sidebar-footer">Data source: GitHub repo Excel file<br>File: inventory_data.xlsx</div>
+    </div>
+
+    <div class="main">
+        <div class="header">
+            <h1>Reports</h1>
+            <div class="header-actions">
+                <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
+                <div class="profile" id="profileName">—</div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Current Stock by Product</h2>
+            </div>
+            <div id="productsTable"></div>
+            <p id="productsEmpty" style="display:none;" class="empty-note">No stock recorded yet.</p>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Aging Stock — 3+ Months In Warehouse</h2>
+            </div>
+            <div id="agingTable"></div>
+            <p id="agingEmpty" style="display:none;" class="empty-note">Nothing has been sitting too long. All clear.</p>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Recent Transactions</h2>
+            </div>
+            <div id="txTable"></div>
+            <p id="txEmpty" style="display:none;" class="empty-note">No transactions logged yet.</p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        requireLogin();
+        document.getElementById("profileName").textContent = localStorage.getItem("userName");
+
+        async function loadProducts() {
+            const data = await apiGet("/api/products");
+            const rows = data.products || [];
+            if (!rows.length) { document.getElementById("productsEmpty").style.display = "block"; return; }
+            document.getElementById("productsTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Product</th><th>Total Quantity</th><th>By Location</th></tr></thead>
+                    <tbody>
+                        ${rows.map(p => `
+                            <tr>
+                                <td>${p.product}</td>
+                                <td>${fmtQty(p.total)}</td>
+                                <td>${p.locations.map(l => `${l.location}: ${fmtQty(l.quantity)}`).join(" · ")}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        async function loadAging() {
+            const data = await apiGet("/api/aging-report");
+            const rows = data.batches || [];
+            if (!rows.length) { document.getElementById("agingEmpty").style.display = "block"; return; }
+            document.getElementById("agingTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Product</th><th>Location</th><th>Qty</th><th>Date Received</th><th>Age</th></tr></thead>
+                    <tbody>
+                        ${rows.map(r => `
+                            <tr>
+                                <td>${r.Product}</td>
+                                <td>${r.Location}</td>
+                                <td>${fmtQty(r["Qty Remaining"])} ${r.Unit || ""}</td>
+                                <td>${r["Date Received"]}</td>
+                                <td>${agingPill(r["Age Days"], data.threshold_days)}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        async function loadTransactions() {
+            const data = await apiGet("/api/transactions?limit=50");
+            const rows = data.transactions || [];
+            if (!rows.length) { document.getElementById("txEmpty").style.display = "block"; return; }
+            document.getElementById("txTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>When</th><th>Action</th><th>Product</th><th>From</th><th>To</th><th>Qty</th><th>By</th><th>Status</th></tr></thead>
+                    <tbody>
+                        ${rows.map(t => `
+                            <tr>
+                                <td>${new Date(t.Timestamp).toLocaleString()}</td>
+                                <td>${t.Action}</td>
+                                <td>${t.Product || ""}</td>
+                                <td>${t["From Location"] || "—"}</td>
+                                <td>${t["To Location"] || "—"}</td>
+                                <td>${t.Quantity != null ? fmtQty(t.Quantity) + " " + (t.Unit || "") : "—"}</td>
+                                <td>${t["Entered By"] || ""}</td>
+                                <td>${t.Status}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        (async () => {
+            try {
+                await apiGet("/api/download-url");
+                document.getElementById("downloadBtn").href = API_BASE + "/api/download";
+            } catch (e) { /* ignore */ }
+            await loadProducts();
+            await loadAging();
+            await loadTransactions();
+        })();
+    </script>
+</body>
+</html>

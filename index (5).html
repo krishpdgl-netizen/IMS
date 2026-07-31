@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login | Inventory Management System</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body { display:block; }
+    </style>
+</head>
+<body>
+    <div class="login-wrap">
+        <div class="login-box">
+            <div class="logo">📦 Inventory<span style="color:#d97706">MS</span></div>
+            <div class="tagline">Stock tracking &amp; AI Warehouse Assistant</div>
+
+            <form id="loginForm">
+                <label>Your Name</label>
+                <input type="text" id="name" placeholder="e.g. Priya Sharma" required>
+
+                <label>Access Code</label>
+                <input type="password" id="accessCode" placeholder="Enter shared access code" required>
+
+                <button type="submit" class="btn-primary">Login</button>
+                <div class="login-error" id="err" style="display:none;"></div>
+            </form>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        document.getElementById("loginForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const name = document.getElementById("name").value.trim();
+            const accessCode = document.getElementById("accessCode").value;
+            const errBox = document.getElementById("err");
+            errBox.style.display = "none";
+            try {
+                const res = await apiPost("/api/login", { name, access_code: accessCode });
+                if (res.success) {
+                    localStorage.setItem("userName", res.name);
+                    window.location.href = "dashboard.html";
+                } else {
+                    errBox.textContent = res.message || "Login failed.";
+                    errBox.style.display = "block";
+                }
+            } catch (err) {
+                errBox.textContent = "Could not reach the server. Please try again.";
+                errBox.style.display = "block";
+            }
+        });
+    </script>
+</body>
+</html>
