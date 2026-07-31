@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard | Inventory Management System</title>
     <link rel="stylesheet" href="style.css">
-    <script src="chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="sidebar">
@@ -136,6 +136,8 @@
                 });
             } catch (e) {
                 console.error("Location chart failed:", e);
+                document.getElementById("locationEmpty").textContent =
+                    "Chart couldn't load (" + e.message + "). Stock data itself is fine — check your connection and refresh.";
                 document.getElementById("locationEmpty").style.display = "block";
             }
         }
