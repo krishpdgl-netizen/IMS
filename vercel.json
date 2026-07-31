@@ -1,8 +1,17 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [
+    { "src": "main.py", "use": "@vercel/python" },
+    { "src": "*.html", "use": "@vercel/static" },
+    { "src": "*.css", "use": "@vercel/static" },
+    { "src": "*.js", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/api/(.*)", "dest": "main.py" },
+    { "src": "/$", "dest": "/index.html" },
+    { "src": "/(.*\\.(html|css|js))$", "dest": "/$1" }
+  ],
   "functions": {
-    "main.py": {
-      "maxDuration": 30
-    }
+    "main.py": { "maxDuration": 30 }
   }
 }
