@@ -22,6 +22,9 @@
         <div class="header">
             <h1>Inventory Dashboard</h1>
             <div class="header-actions">
+                <button class="btn-action btn-log" onclick="openLogModal()">＋ Log Stock</button>
+                <button class="btn-action btn-scan" onclick="document.getElementById('documentInput').click()">⌕ Scan Bill</button>
+                <input id="documentInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.gif" hidden onchange="scanDocument(this)">
                 <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
                 <div class="profile" id="profileName">—</div>
                 <button class="logout-btn" onclick="logout()">Logout</button>
@@ -54,21 +57,67 @@
             </div>
         </div>
 
-        <div class="section">
-            <div class="section-header">
-                <h2>Get Started</h2>
+        <div class="quick-actions section">
+            <div class="section-header"><div><h2>What do you want to do?</h2><p class="section-help">Pick the obvious button. You do not need to know how the inventory system works.</p></div></div>
+            <div class="action-grid">
+                <button class="action-tile" onclick="openLogModal()"><span>＋</span><b>Log Stock Movement</b><small>Receive, dispatch, transfer or adjust stock</small></button>
+                <button class="action-tile" onclick="document.getElementById('documentInput').click()"><span>⌕</span><b>Scan a Bill / Challan</b><small>Upload a PDF or photo and let AI read it</small></button>
+                <a class="action-tile" href="assistant.html"><span>✦</span><b>Ask the AI Assistant</b><small>Type what happened in plain English</small></a>
+                <a class="action-tile" href="reports.html"><span>▤</span><b>Open Reports</b><small>See stock, aging and transaction history</small></a>
             </div>
-            <p style="color:#374151; line-height:1.7; font-size:14px;">
-                Use the <b>AI Warehouse Assistant</b> to record stock movements in plain English — e.g.
-                "received 200 units of Dell Laptop in Mumbai Warehouse" or "dispatched 50 Dell Laptop
-                from Mumbai Warehouse" — and the ledger updates automatically. Stock is tracked batch
-                by batch (FIFO), so the oldest stock is always used first and anything sitting around
-                for more than three months shows up here as an aging alert. You can also just ask
-                things like "how much Dell Laptop do we have and where is it kept?" and the assistant
-                will answer straight from the live ledger. The full workbook is always downloadable
-                as <b>inventory_report.xlsx</b> above.
-            </p>
         </div>
+
+        <div class="section">
+            <div class="section-header"><h2>How this works</h2></div>
+            <div class="simple-steps">
+                <div><strong>1</strong><span><b>Something came in or went out?</b><br>Use <b>Log Stock Movement</b>.</span></div>
+                <div><strong>2</strong><span><b>Have a bill or challan?</b><br>Use <b>Scan a Bill / Challan</b>. AI reads it and you confirm before saving.</span></div>
+                <div><strong>3</strong><span><b>Want to ask a question?</b><br>Use the AI Assistant — stock numbers come from the live ledger.</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual transaction modal -->
+    <div class="modal-backdrop" id="logModal" onclick="if(event.target===this)closeLogModal()">
+      <div class="modal">
+        <div class="modal-head"><div><h2>Log Stock Movement</h2><p>Fill only what you know. The system will stop you if something is missing.</p></div><button class="modal-close" onclick="closeLogModal()">×</button></div>
+        <form id="logForm" onsubmit="submitLog(event)">
+          <div class="form-section-title">1. What happened?</div>
+          <div class="action-choice">
+            <label><input type="radio" name="action" value="RECEIVE" checked onchange="updateActionFields()"><span>📥 <b>Stock In</b><small>Goods received</small></span></label>
+            <label><input type="radio" name="action" value="DISPATCH" onchange="updateActionFields()"><span>📤 <b>Stock Out</b><small>Goods sent to customer</small></span></label>
+            <label><input type="radio" name="action" value="TRANSFER" onchange="updateActionFields()"><span>↔ <b>Transfer</b><small>Move between locations</small></span></label>
+            <label><input type="radio" name="action" value="ADJUST" onchange="updateActionFields()"><span>⚙ <b>Adjustment</b><small>Correction / damage / count</small></span></label>
+          </div>
+          <div class="form-grid">
+            <label>Product name *<input name="product" required placeholder="e.g. Dell Laptop"></label>
+            <label>Serial number(s)<input name="serial_number" placeholder="e.g. DL-001, DL-002"></label>
+            <label>Quantity *<input name="quantity" type="number" step="0.01" min="0.01" required placeholder="0"></label>
+            <label>Unit<select name="unit"><option>units</option><option>pcs</option><option>boxes</option><option>kg</option><option>litres</option></select></label>
+            <label id="locationField">Location *<input name="location" placeholder="e.g. Mumbai Warehouse"></label>
+            <label id="fromField" class="hidden-field">From location<input name="from_location" placeholder="Source warehouse"></label>
+            <label id="toField" class="hidden-field">To location<input name="to_location" placeholder="Destination warehouse"></label>
+            <label>Date received<input name="date_received" type="date"></label>
+            <label>Reference / Bill No.<input name="reference_no" placeholder="e.g. DC-1024"></label>
+            <label class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
+          </div>
+          <div class="form-note">💡 <b>Serial number is optional.</b> Add it when the product is individually identifiable.</div>
+          <div id="logError" class="form-error"></div>
+          <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeLogModal()">Cancel</button><button class="btn-primary-inline" id="saveLogBtn">Save to Inventory</button></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Document review modal -->
+    <div class="modal-backdrop" id="scanModal" onclick="if(event.target===this)closeScanModal()">
+      <div class="modal modal-wide">
+        <div class="modal-head"><div><h2>Review Scanned Document</h2><p>AI has read the document. Check the highlighted fields before saving.</p></div><button class="modal-close" onclick="closeScanModal()">×</button></div>
+        <div id="scanStatus" class="scan-status"></div>
+        <div id="scanMeta" class="scan-meta"></div>
+        <div id="scanDrafts"></div>
+        <div id="scanError" class="form-error"></div>
+        <div class="modal-actions"><button class="btn-secondary" onclick="closeScanModal()">Cancel</button><button class="btn-primary-inline" id="saveScanBtn" onclick="commitScannedDocument()">Confirm & Save All</button></div>
+      </div>
     </div>
 
     <script src="app.js"></script>
@@ -164,6 +213,123 @@
             `;
         }
 
+
+        let scannedDocument = null;
+
+        function openLogModal() {
+            document.getElementById("logModal").classList.add("open");
+            updateActionFields();
+        }
+        function closeLogModal() { document.getElementById("logModal").classList.remove("open"); }
+        function updateActionFields() {
+            const action = document.querySelector('input[name="action"]:checked').value;
+            document.getElementById("locationField").classList.toggle("hidden-field", action === "TRANSFER");
+            document.getElementById("fromField").classList.toggle("hidden-field", action !== "TRANSFER");
+            document.getElementById("toField").classList.toggle("hidden-field", action !== "TRANSFER");
+            document.getElementById("locationField").querySelector("input").required = action !== "TRANSFER";
+            document.getElementById("fromField").querySelector("input").required = action === "TRANSFER";
+            document.getElementById("toField").querySelector("input").required = action === "TRANSFER";
+        }
+
+        async function submitLog(e) {
+            e.preventDefault();
+            const form = e.target, btn = document.getElementById("saveLogBtn");
+            const fd = new FormData(form), body = Object.fromEntries(fd.entries());
+            body.action = body.action.toUpperCase();
+            body.quantity = Number(body.quantity);
+            body.entered_by = localStorage.getItem("userName") || "Dashboard User";
+            btn.disabled = true; btn.textContent = "Saving…";
+            document.getElementById("logError").textContent = "";
+            try {
+                const res = await fetch(API_BASE + "/api/log", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.message || data.detail || "Could not save transaction.");
+                closeLogModal();
+                form.reset(); document.querySelector('input[name="action"][value="RECEIVE"]').checked = true;
+                showToast(data.message || "Inventory updated successfully.");
+                await loadCards(); await loadLocationChart(); await loadAgingList();
+            } catch (err) { document.getElementById("logError").textContent = err.message; }
+            finally { btn.disabled = false; btn.textContent = "Save to Inventory"; }
+        }
+
+        async function scanDocument(input) {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            document.getElementById("scanModal").classList.add("open");
+            document.getElementById("scanStatus").innerHTML = '<span class="spinner"></span> Reading document…';
+            document.getElementById("scanMeta").innerHTML = "";
+            document.getElementById("scanDrafts").innerHTML = "";
+            document.getElementById("scanError").textContent = "";
+            document.getElementById("saveScanBtn").style.display = "none";
+            try {
+                const fd = new FormData(); fd.append("file", file);
+                const res = await fetch(API_BASE + "/api/scan-document", {method:"POST", body:fd});
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.detail || "Could not read this document.");
+                scannedDocument = data;
+                renderScanReview(data, file.name);
+            } catch(err) {
+                document.getElementById("scanStatus").innerHTML = "⚠ Could not read this document.";
+                document.getElementById("scanError").textContent = err.message;
+            } finally { input.value = ""; }
+        }
+
+        function esc(v) { return String(v ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
+
+        function renderScanReview(data, filename) {
+            const d=data.document || {};
+            const direction=data.action || "UNKNOWN";
+            const label={RECEIVE:"INWARD — STOCK COMING IN",DISPATCH:"OUTWARD — STOCK GOING OUT",TRANSFER:"INTERNAL TRANSFER",UNKNOWN:"DIRECTION NEEDS REVIEW"}[direction] || direction;
+            document.getElementById("scanStatus").innerHTML = `<span class="direction-badge ${direction.toLowerCase()}">${esc(label)}</span><span class="confidence">${esc(d.confidence_notes || "")}</span>`;
+            document.getElementById("scanMeta").innerHTML = `
+              <div><b>Document</b><span>${esc(d.document_type || "—")} ${esc(d.document_number || "")}</span></div>
+              <div><b>Party</b><span>${esc(d.party_name || "—")}</span></div>
+              <div><b>Delivery address</b><span>${esc(d.delivery_address || "—")}</span></div>
+              <div><b>Date</b><span>${esc(d.document_date || "—")}</span></div>`;
+            const drafts=data.drafts || [];
+            document.getElementById("scanDrafts").innerHTML = drafts.length ? `
+              <div class="review-title">Items to log — click any value to correct it</div>
+              <div class="review-table-wrap"><table class="data-table review-table"><thead><tr><th>Action</th><th>Product</th><th>Serial No.</th><th>Qty</th><th>Unit</th><th>Location / From</th><th>To</th><th>Reference</th></tr></thead>
+              <tbody>${drafts.map((r,i)=>`<tr>
+                <td><select data-i="${i}" data-k="action"><option ${r.action==="RECEIVE"?"selected":""}>RECEIVE</option><option ${r.action==="DISPATCH"?"selected":""}>DISPATCH</option><option ${r.action==="TRANSFER"?"selected":""}>TRANSFER</option></select></td>
+                <td><input data-i="${i}" data-k="product" value="${esc(r.product)}"></td>
+                <td><input data-i="${i}" data-k="serial_number" value="${esc(r.serial_number)}"></td>
+                <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" value="${esc(r.quantity)}"></td>
+                <td><input data-i="${i}" data-k="unit" value="${esc(r.unit)}"></td>
+                <td><input data-i="${i}" data-k="location" value="${esc(r.location)}" placeholder="Warehouse"></td>
+                <td><input data-i="${i}" data-k="to_location" value="${esc(r.to_location || "")}" placeholder="Destination (transfer only)"></td>
+                <td><input data-i="${i}" data-k="reference_no" value="${esc(r.reference_no)}"></td>
+              </tr>`).join("")}</tbody></table></div>` : '<div class="empty-note">No usable line items were found. Please enter the transaction manually.</div>';
+            document.getElementById("saveScanBtn").style.display = drafts.length ? "inline-flex" : "none";
+        }
+
+        async function commitScannedDocument() {
+            if (!scannedDocument) return;
+            const btn=document.getElementById("saveScanBtn"); btn.disabled=true; btn.textContent="Saving…";
+            document.getElementById("scanError").textContent="";
+            const drafts=[...document.querySelectorAll("#scanDrafts [data-i]")].reduce((acc,el)=>{
+                const i=Number(el.dataset.i), k=el.dataset.k; acc[i]=acc[i]||{...scannedDocument.drafts[i]}; acc[i][k]=el.value; return acc;
+            },[]);
+            drafts.forEach(x=>{x.quantity=Number(x.quantity); if(x.action==="TRANSFER"){x.from_location=x.location;}});
+            const d=scannedDocument.document||{};
+            const body={document_type:d.document_type||"",document_number:d.document_number||"",document_date:d.document_date||null,
+              delivery_address:d.delivery_address||"",direction:d.direction||"UNKNOWN",source_location:d.source_location||"",
+              destination_location:d.destination_location||"",party_name:d.party_name||"",items:drafts,
+              entered_by:localStorage.getItem("userName")||"Dashboard User",source_document:d._filename||""};
+            try {
+              const res=await fetch(API_BASE+"/api/log-document",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+              const data=await res.json();
+              if(!res.ok||!data.success) throw new Error(data.message||data.detail||"Could not save document.");
+              closeScanModal(); scannedDocument=null; showToast("Document logged and inventory updated.");
+              await loadCards(); await loadLocationChart(); await loadAgingList();
+            } catch(err){document.getElementById("scanError").textContent=err.message;}
+            finally{btn.disabled=false;btn.textContent="Confirm & Save All";}
+        }
+        function closeScanModal(){document.getElementById("scanModal").classList.remove("open");}
+        function showToast(message) {
+          const t=document.createElement("div"); t.className="toast"; t.textContent="✓ "+message; document.body.appendChild(t);
+          setTimeout(()=>t.remove(),3500);
+        }
         (async () => {
             try {
                 const urlRes = await apiGet("/api/download-url");
