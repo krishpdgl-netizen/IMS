@@ -63,7 +63,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -83,6 +83,8 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"  # fixed per requirements - do not swap m
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 AGING_THRESHOLD_DAYS = int(os.environ.get("AGING_THRESHOLD_DAYS") or "90")
+OWN_DELIVERY_ADDRESSES = os.environ.get("OWN_DELIVERY_ADDRESSES") or ""
+OWN_COMPANY_NAME = os.environ.get("OWN_COMPANY_NAME") or ""
 
 GITHUB_API = "https://api.github.com"
 GH_HEADERS = {
@@ -97,12 +99,14 @@ GH_HEADERS = {
 # ----------------------------------------------------------------------------
 BATCH_SHEET = "Batches"
 BATCH_HEADERS = ["Batch ID", "Product", "Location", "Date Received",
-                  "Qty Received", "Qty Remaining", "Unit", "Status"]
+                  "Qty Received", "Qty Remaining", "Unit", "Status",
+                  "Serial Number", "Reference No.", "Source Document", "Delivery Address"]
 
 LOG_SHEET = "Transaction Log"
 LOG_HEADERS = ["Timestamp", "Original Message", "Action", "Product",
                "From Location", "To Location", "Quantity", "Unit",
-               "Entered By", "Status", "Reversal Data"]
+               "Entered By", "Status", "Reversal Data",
+               "Serial Number", "Reference No.", "Document Type", "Delivery Address", "Source Document"]
 
 ACTIONS = {"RECEIVE", "DISPATCH", "TRANSFER", "ADJUST"}
 
@@ -180,6 +184,22 @@ class ExcelService:
         if raw is None:
             return cls.new_workbook()
         wb = load_workbook(io.BytesIO(raw), data_only=False)
+        # Backward-compatible schema migration: append new columns while preserving
+        # the original FIFO/log column positions.
+        if BATCH_SHEET in wb.sheetnames:
+            ws_existing = wb[BATCH_SHEET]
+            existing = [ws_existing.cell(1, c).value for c in range(1, ws_existing.max_column + 1)]
+            for header in BATCH_HEADERS:
+                if header not in existing:
+                    ws_existing.cell(1, ws_existing.max_column + 1, header)
+                    existing.append(header)
+        if LOG_SHEET in wb.sheetnames:
+            log_existing = wb[LOG_SHEET]
+            existing = [log_existing.cell(1, c).value for c in range(1, log_existing.max_column + 1)]
+            for header in LOG_HEADERS:
+                if header not in existing:
+                    log_existing.cell(1, log_existing.max_column + 1, header)
+                    existing.append(header)
         if BATCH_SHEET not in wb.sheetnames:
             ws = wb.create_sheet(BATCH_SHEET)
             ws.append(BATCH_HEADERS)
@@ -230,10 +250,12 @@ class ExcelService:
 
     @classmethod
     def add_batch(cls, wb: Workbook, product: str, location: str, date_received: str,
-                  qty: float, unit: str) -> int:
+                  qty: float, unit: str, serial_number: str = "", reference_no: str = "",
+                  source_document: str = "", delivery_address: str = "") -> int:
         ws = cls._batch_ws(wb)
         batch_id = cls.next_batch_id(wb)
-        ws.append([batch_id, product, location, date_received, qty, qty, unit, "Active"])
+        ws.append([batch_id, product, location, date_received, qty, qty, unit, "Active",
+                   serial_number or "", reference_no or "", source_document or "", delivery_address or ""])
         return batch_id
 
     @classmethod
@@ -330,11 +352,16 @@ class ExcelService:
     def append_log(cls, wb: Workbook, original_msg: str, action: str, product: str,
                    from_location: Optional[str], to_location: Optional[str],
                    qty: Optional[float], unit: Optional[str], entered_by: str,
-                   status: str, reversal_data: Optional[list] = None) -> int:
+                   status: str, reversal_data: Optional[list] = None,
+                   serial_number: str = "", reference_no: str = "",
+                   document_type: str = "", delivery_address: str = "",
+                   source_document: str = "") -> int:
         ws = wb[LOG_SHEET]
         now = datetime.now(timezone.utc).isoformat()
         ws.append([now, original_msg, action, product, from_location, to_location,
-                   qty, unit, entered_by, status, json.dumps(reversal_data or [])])
+                   qty, unit, entered_by, status, json.dumps(reversal_data or []),
+                   serial_number or "", reference_no or "", document_type or "",
+                   delivery_address or "", source_document or ""])
         return ws.max_row
 
     @classmethod
@@ -515,11 +542,18 @@ Return ONLY the JSON object, nothing else.
 class InventoryService:
 
     @classmethod
-    def apply_movement(cls, wb: Workbook, parsed: dict, original_msg: str, entered_by: str) -> dict:
+    def apply_movement(cls, wb: Workbook, parsed: dict, original_msg: str, entered_by: str,
+                        metadata: Optional[dict] = None) -> dict:
         action = parsed.get("action")
         product = (parsed.get("product") or "").strip()
         unit = (parsed.get("unit") or "units").strip()
         qty = parsed.get("quantity")
+        metadata = metadata or {}
+        serial_number = (parsed.get("serial_number") or metadata.get("serial_number") or "").strip()
+        reference_no = (parsed.get("reference_no") or metadata.get("reference_no") or "").strip()
+        source_document = (metadata.get("source_document") or "").strip()
+        delivery_address = (parsed.get("delivery_address") or metadata.get("delivery_address") or "").strip()
+        document_type = (metadata.get("document_type") or "").strip()
 
         if action not in ACTIONS:
             raise ValueError(f"Unknown action '{action}'.")
@@ -533,10 +567,11 @@ class InventoryService:
             if not qty or qty <= 0:
                 raise ValueError("Quantity to receive must be a positive number.")
             date_received = parsed.get("date_received") or date.today().isoformat()
-            batch_id = ExcelService.add_batch(wb, product, location, date_received, qty, unit)
+            batch_id = ExcelService.add_batch(wb, product, location, date_received, qty, unit, serial_number, reference_no, source_document, delivery_address)
             ExcelService.append_log(wb, original_msg, "RECEIVE", product, None, location,
                                      qty, unit, entered_by, "Applied",
-                                     [{"batch_id": batch_id}])
+                                     [{"batch_id": batch_id}], serial_number, reference_no,
+                                     document_type, delivery_address, source_document)
             return {"action": "RECEIVE", "product": product, "location": location,
                     "quantity": qty, "unit": unit, "date_received": date_received,
                     "message": f"Recorded {qty} {unit} of {product} received at {location} "
@@ -558,7 +593,9 @@ class InventoryService:
                 raise ValueError(f"Only {available} {unit} of {product} available at {location}, "
                                   f"cannot dispatch {qty}.")
             ExcelService.append_log(wb, original_msg, "DISPATCH", product, location, None,
-                                     qty, unit, entered_by, "Applied", breakdown)
+                                     qty, unit, entered_by, "Applied", breakdown,
+                                     serial_number, reference_no, document_type,
+                                     delivery_address, source_document)
             oldest = breakdown[0]["date_received"] if breakdown else None
             return {"action": "DISPATCH", "product": product, "location": location,
                     "quantity": qty, "unit": unit,
@@ -579,11 +616,14 @@ class InventoryService:
             created_ids = []
             for item in breakdown:
                 bid = ExcelService.add_batch(wb, product, to_location, item["date_received"],
-                                              item["qty_taken"], unit)
+                                              item["qty_taken"], unit, serial_number, reference_no,
+                                              source_document, delivery_address)
                 created_ids.append(bid)
             ExcelService.append_log(wb, original_msg, "TRANSFER", product, from_location, to_location,
                                      qty, unit, entered_by, "Applied",
-                                     {"consumed": breakdown, "created_batch_ids": created_ids})
+                                     {"consumed": breakdown, "created_batch_ids": created_ids},
+                                     serial_number, reference_no, document_type,
+                                     delivery_address, source_document)
             return {"action": "TRANSFER", "product": product, "from_location": from_location,
                     "to_location": to_location, "quantity": qty, "unit": unit,
                     "message": f"Transferred {qty} {unit} of {product} from {from_location} to "
@@ -596,9 +636,11 @@ class InventoryService:
             if qty is None or qty == 0:
                 raise ValueError("Adjustment quantity must be a non-zero number.")
             if qty > 0:
-                batch_id = ExcelService.add_batch(wb, product, location, date.today().isoformat(), qty, unit)
+                batch_id = ExcelService.add_batch(wb, product, location, date.today().isoformat(), qty, unit, serial_number, reference_no, source_document, delivery_address)
                 ExcelService.append_log(wb, original_msg, "ADJUST", product, None, location,
-                                         qty, unit, entered_by, "Applied", [{"batch_id": batch_id}])
+                                         qty, unit, entered_by, "Applied", [{"batch_id": batch_id}],
+                                         serial_number, reference_no, document_type,
+                                         delivery_address, source_document)
                 return {"action": "ADJUST", "product": product, "location": location,
                         "quantity": qty, "unit": unit,
                         "message": f"Added {qty} {unit} of {product} to {location} as a stock-count correction."}
@@ -609,7 +651,9 @@ class InventoryService:
                     raise ValueError(f"Cannot write off {abs(qty)} {unit} of {product} at {location} - "
                                       f"only {abs(qty) - shortfall} {unit} on hand.")
                 ExcelService.append_log(wb, original_msg, "ADJUST", product, location, None,
-                                         qty, unit, entered_by, "Applied", breakdown)
+                                         qty, unit, entered_by, "Applied", breakdown,
+                                         serial_number, reference_no, document_type,
+                                         delivery_address, source_document)
                 return {"action": "ADJUST", "product": product, "location": location,
                         "quantity": qty, "unit": unit,
                         "message": f"Wrote off {abs(qty)} {unit} of {product} at {location}."}
@@ -665,6 +709,87 @@ class InventoryService:
                 "rows": locs}
 
 
+
+# ============================================================================
+# DOCUMENT INTELLIGENCE
+# Upload a delivery challan / invoice / inward-outward bill and let Gemini
+# extract the transaction. The result is ALWAYS returned for human review
+# before anything is written to the ledger.
+# ============================================================================
+class DocumentIntelligence:
+    PROMPT = """You are an inventory document extraction engine.
+Read the attached delivery challan, invoice, goods receipt, or out-bill/in-bill.
+
+Return ONLY valid JSON in this exact shape:
+{
+  "document_type": "DELIVERY_CHALLAN" | "INVOICE" | "GOODS_RECEIPT" | "OTHER",
+  "document_number": "string or null",
+  "document_date": "YYYY-MM-DD or null",
+  "delivery_address": "full delivery address or null",
+  "billing_address": "full billing address or null",
+  "party_name": "supplier/customer/party name or null",
+  "direction": "INWARD" | "OUTWARD" | "INTERNAL" | "UNKNOWN",
+  "source_location": "known internal location or null",
+  "destination_location": "known internal location or null",
+  "items": [
+    {
+      "product": "clean product/item description",
+      "serial_number": "serial number(s) if visible, otherwise empty",
+      "quantity": number,
+      "unit": "units/pcs/boxes/kg/etc.",
+      "description": "short original line description"
+    }
+  ],
+  "confidence_notes": "brief notes about ambiguous or unreadable fields"
+}
+
+DIRECTION RULE:
+- INWARD means goods are coming INTO our company/warehouse. A delivery address
+  matching one of our own addresses or internal warehouse locations generally
+  indicates INWARD.
+- OUTWARD means goods are going TO a customer/external destination. A delivery
+  address that is not one of our own addresses generally indicates OUTWARD.
+- INTERNAL means goods move between two of our known internal locations.
+- UNKNOWN means the address evidence is insufficient.
+Never invent a quantity, product, serial number, date, or address. Use null/empty
+when unreadable. Preserve multiple line items separately.
+Known internal locations: {known_locations}
+Our company name: {company_name}
+Our own delivery/warehouse addresses: {own_addresses}
+"""
+
+    @classmethod
+    def parse(cls, raw: bytes, mime_type: str, filename: str, known_locations: List[str]) -> dict:
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not set on the server.")
+        prompt = cls.PROMPT.format(
+            known_locations=", ".join(known_locations) or "(none yet)",
+            company_name=OWN_COMPANY_NAME or "(not configured)",
+            own_addresses=OWN_DELIVERY_ADDRESSES or "(not configured; use known internal locations where possible)",
+        )
+        payload = {
+            "system_instruction": {"parts": [{"text": prompt}]},
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": f"Extract this inventory document. Filename: {filename}"},
+                    {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(raw).decode("ascii")}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.0, "response_mime_type": "application/json"},
+        }
+        resp = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"Unexpected Gemini document response: {data}") from e
+        text = re.sub(r"^```json|```$", "", text.strip(), flags=re.MULTILINE).strip()
+        parsed = json.loads(text)
+        parsed["_filename"] = filename
+        return parsed
+
 # ============================================================================
 # API
 # ============================================================================
@@ -687,6 +812,37 @@ class ChatIn(BaseModel):
     entered_by: str
 
 
+class TransactionIn(BaseModel):
+    action: str
+    product: str
+    quantity: float
+    unit: str = "units"
+    location: Optional[str] = ""
+    from_location: Optional[str] = ""
+    to_location: Optional[str] = ""
+    date_received: Optional[str] = None
+    serial_number: Optional[str] = ""
+    reference_no: Optional[str] = ""
+    delivery_address: Optional[str] = ""
+    document_type: Optional[str] = ""
+    source_document: Optional[str] = ""
+    entered_by: str
+
+
+class DocumentLogIn(BaseModel):
+    document_type: str = ""
+    document_number: str = ""
+    document_date: Optional[str] = None
+    delivery_address: str = ""
+    direction: str
+    source_location: str = ""
+    destination_location: str = ""
+    party_name: str = ""
+    items: list
+    entered_by: str
+    source_document: str = ""
+
+
 @app.post("/api/login")
 def login(data: LoginIn):
     if data.access_code != ACCESS_CODE:
@@ -694,6 +850,143 @@ def login(data: LoginIn):
     if not data.name.strip():
         return {"success": False, "message": "Please enter your name."}
     return {"success": True, "name": data.name.strip()}
+
+
+@app.post("/api/log")
+def log_transaction(data: TransactionIn):
+    """Human-friendly form entry. Uses the exact same FIFO engine as the AI."""
+    parsed = {
+        "type": "movement",
+        "action": data.action.upper().strip(),
+        "product": data.product.strip(),
+        "quantity": data.quantity,
+        "unit": data.unit.strip() or "units",
+        "location": (data.location or "").strip(),
+        "from_location": (data.from_location or "").strip(),
+        "to_location": (data.to_location or "").strip(),
+        "date_received": data.date_received,
+        "serial_number": (data.serial_number or "").strip(),
+        "reference_no": (data.reference_no or "").strip(),
+        "delivery_address": (data.delivery_address or "").strip(),
+    }
+    if parsed["action"] == "RECEIVE" and not parsed["date_received"]:
+        parsed["date_received"] = date.today().isoformat()
+    metadata = {
+        "serial_number": data.serial_number or "",
+        "reference_no": data.reference_no or "",
+        "delivery_address": data.delivery_address or "",
+        "document_type": data.document_type or "MANUAL_FORM",
+        "source_document": data.source_document or "",
+    }
+    try:
+        wb = ExcelService.load_live_workbook()
+        result = InventoryService.apply_movement(
+            wb, parsed,
+            f"Manual form entry: {parsed['action']} {parsed['quantity']} {parsed['unit']} {parsed['product']}",
+            data.entered_by,
+            metadata,
+        )
+        ExcelService.save(wb, f"Manual {result['action']}: {data.product} ({data.entered_by})")
+        return {"success": True, **result}
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
+    except Exception as e:
+        raise HTTPException(500, f"Could not log transaction: {e}")
+
+
+@app.post("/api/scan-document")
+async def scan_document(file: UploadFile = File(...)):
+    """Extract a document into a reviewable transaction draft; does NOT write stock."""
+    if not file.filename:
+        raise HTTPException(400, "Please choose a document.")
+    allowed = {
+        "application/pdf", "image/jpeg", "image/png", "image/webp",
+        "image/heic", "image/heif", "image/gif"
+    }
+    mime = file.content_type or "application/octet-stream"
+    if mime not in allowed:
+        raise HTTPException(400, "Please upload a PDF or image (JPG, PNG, WEBP, HEIC).")
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(413, "Document is too large. Please keep it under 15 MB.")
+    try:
+        wb = ExcelService.load_live_workbook()
+        parsed = DocumentIntelligence.parse(raw, mime, file.filename, ExcelService.known_locations(wb))
+        # Convert document-level extraction into ready-to-review transaction drafts.
+        direction = str(parsed.get("direction") or "UNKNOWN").upper()
+        action = {"INWARD": "RECEIVE", "OUTWARD": "DISPATCH", "INTERNAL": "TRANSFER"}.get(direction, "UNKNOWN")
+        drafts = []
+        for item in parsed.get("items") or []:
+            drafts.append({
+                "action": action,
+                "product": item.get("product") or "",
+                "serial_number": item.get("serial_number") or "",
+                "quantity": item.get("quantity") or 0,
+                "unit": item.get("unit") or "units",
+                "date_received": parsed.get("document_date") or date.today().isoformat(),
+                "location": (
+                    (parsed.get("destination_location") or "") if action == "RECEIVE"
+                    else (parsed.get("source_location") or "") if action == "DISPATCH"
+                    else ""
+                ),
+                "from_location": parsed.get("source_location") or "",
+                "to_location": parsed.get("destination_location") or "",
+                "reference_no": parsed.get("document_number") or "",
+                "delivery_address": parsed.get("delivery_address") or "",
+            })
+        return {
+            "success": True,
+            "document": parsed,
+            "action": action,
+            "drafts": drafts,
+            "needs_review": action == "UNKNOWN" or not drafts,
+        }
+    except Exception as e:
+        raise HTTPException(502, f"Could not read the document: {e}")
+
+
+@app.post("/api/log-document")
+def log_document(data: DocumentLogIn):
+    """Commit reviewed document drafts. Each line becomes a normal inventory transaction."""
+    try:
+        wb = ExcelService.load_live_workbook()
+        results = []
+        for item in data.items:
+            action = str(item.get("action") or "").upper()
+            if action == "UNKNOWN":
+                raise ValueError("Direction is still unknown. Please choose Inward or Outward for every line.")
+            parsed = {
+                "type": "movement",
+                "action": action,
+                "product": str(item.get("product") or "").strip(),
+                "quantity": float(item.get("quantity") or 0),
+                "unit": str(item.get("unit") or "units").strip(),
+                "location": str(item.get("location") or "").strip(),
+                "from_location": str(item.get("from_location") or "").strip(),
+                "to_location": str(item.get("to_location") or "").strip(),
+                "date_received": item.get("date_received") or data.document_date or date.today().isoformat(),
+                "serial_number": str(item.get("serial_number") or "").strip(),
+                "reference_no": str(item.get("reference_no") or data.document_number or "").strip(),
+                "delivery_address": str(item.get("delivery_address") or data.delivery_address or "").strip(),
+            }
+            metadata = {
+                "serial_number": parsed["serial_number"],
+                "reference_no": parsed["reference_no"],
+                "delivery_address": parsed["delivery_address"],
+                "document_type": data.document_type or "SCANNED_DOCUMENT",
+                "source_document": data.source_document or "",
+            }
+            results.append(InventoryService.apply_movement(
+                wb, parsed,
+                f"Scanned {data.document_type or 'document'} {data.document_number}".strip(),
+                data.entered_by, metadata
+            ))
+        ExcelService.save(wb, f"Logged scanned document {data.document_number} ({data.entered_by})")
+        return {"success": True, "results": results}
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
+    except Exception as e:
+        raise HTTPException(500, f"Could not log scanned document: {e}")
 
 
 @app.post("/api/chat")
@@ -764,9 +1057,17 @@ def products():
     wb = ExcelService.load_live_workbook()
     summary = ExcelService.stock_summary(wb)
     out = []
+    batches = ExcelService.all_batches(wb)
     for product, locs in sorted(summary.items()):
+        serials = []
+        for b in batches:
+            if str(b["Product"]).strip().lower() == product.strip().lower() and (b["Qty Remaining"] or 0) > 0:
+                sn = str(b.get("Serial Number") or "").strip()
+                if sn:
+                    serials.append({"serial_number": sn, "location": b["Location"], "quantity": b["Qty Remaining"]})
         out.append({"product": product, "total": round(sum(locs.values()), 4),
-                    "locations": [{"location": l, "quantity": q} for l, q in sorted(locs.items())]})
+                    "locations": [{"location": l, "quantity": q} for l, q in sorted(locs.items())],
+                    "serial_numbers": serials})
     return {"products": out}
 
 
