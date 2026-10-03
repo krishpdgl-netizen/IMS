@@ -21,6 +21,7 @@
         <div class="header">
             <h1>Reports</h1>
             <div class="header-actions">
+                <a class="btn-action btn-log" href="dashboard.html" style="color:#fff;">＋ Log Stock</a>
                 <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
                 <div class="profile" id="profileName">—</div>
                 <button class="logout-btn" onclick="logout()">Logout</button>
@@ -63,13 +64,14 @@
             if (!rows.length) { document.getElementById("productsEmpty").style.display = "block"; return; }
             document.getElementById("productsTable").innerHTML = `
                 <table class="data-table">
-                    <thead><tr><th>Product</th><th>Total Quantity</th><th>By Location</th></tr></thead>
+                    <thead><tr><th>Product</th><th>Total Quantity</th><th>By Location</th><th>Serial Number(s)</th></tr></thead>
                     <tbody>
                         ${rows.map(p => `
                             <tr>
                                 <td>${p.product}</td>
                                 <td>${fmtQty(p.total)}</td>
                                 <td>${p.locations.map(l => `${l.location}: ${fmtQty(l.quantity)}`).join(" · ")}</td>
+                                <td>${(p.serial_numbers || []).length ? p.serial_numbers.map(s => `${s.serial_number} (${s.location})`).join(", ") : "—"}</td>
                             </tr>
                         `).join("")}
                     </tbody>
