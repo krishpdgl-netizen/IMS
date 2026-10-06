@@ -23,6 +23,7 @@
             <h1>Inventory Dashboard</h1>
             <div class="header-actions">
                 <button class="btn-action btn-log" onclick="openLogModal()">＋ Log Stock</button>
+                <button class="btn-action btn-scan" onclick="document.getElementById('documentInput').click()">⌕ Scan Bill</button>
                 <input id="documentInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.gif" hidden onchange="scanDocument(this)">
                 <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
                 <div class="profile" id="profileName">—</div>
@@ -104,7 +105,11 @@
             <label><input type="radio" name="action" value="ADJUST" onchange="updateActionFields()"><span>⚙ <b>Adjustment</b><small>Correction / damage / count</small></span></label>
           </div>
           <div class="form-grid">
-            <label>Product name *<input name="product" required placeholder="e.g. Dell Laptop"></label>
+            <label>Product name *
+              <input name="product" list="productOptions" required autocomplete="off" placeholder="Start typing a product…">
+              <datalist id="productOptions"></datalist>
+              <small style="display:block;margin-top:5px;color:var(--ink-600);font-size:11.5px;">Start typing to reuse an existing product. A genuinely new product is added to the Product Master automatically when you save.</small>
+            </label>
             <label>Serial number(s)<input name="serial_number" placeholder="e.g. DL-001, DL-002"></label>
             <label>Quantity *<input name="quantity" type="number" step="0.01" min="0.01" required placeholder="0"></label>
             <label>Unit<select name="unit"><option>units</option><option>pcs</option><option>boxes</option><option>kg</option><option>litres</option></select></label>
@@ -191,8 +196,42 @@
             try {
                 await waitForChart();
                 const data = await apiGet("/api/products");
-                const products = data.products || [];
-                if (!products.length) { document.getElementById("locationEmpty").style.display = "block"; return; }
+                const rawProducts = data.products || [];
+                if (!rawProducts.length) { document.getElementById("locationEmpty").style.display = "block"; return; }
+
+                // Product names are user-entered, so the same product can arrive as
+                // "AI NUC", "ai nuc", "Ai Nuc", or with accidental extra spaces.
+                // Treat those spellings as the same product for reporting. We only
+                // normalize case/whitespace here; we do NOT fuzzy-match different
+                // product names because that could incorrectly merge real products.
+                const normalizeProductKey = value => String(value ?? "")
+                    .trim()
+                    .replace(/\s+/g, " ")
+                    .toLowerCase();
+
+                const grouped = new Map();
+                rawProducts.forEach(p => {
+                    const key = normalizeProductKey(p.product);
+                    if (!key) return;
+
+                    const qty = Number(p.total) || 0;
+                    const existing = grouped.get(key);
+                    if (!existing) {
+                        grouped.set(key, { product: String(p.product).trim().replace(/\s+/g, " "), total: qty });
+                    } else {
+                        existing.total += qty;
+                        // Prefer the spelling carrying the larger stock quantity.
+                        // This keeps labels such as "AI NUC" instead of changing them
+                        // to an artificial "Ai Nuc".
+                        if (qty > existing._labelQty) existing.product = String(p.product).trim().replace(/\s+/g, " ");
+                    }
+                    const current = grouped.get(key);
+                    current._labelQty = Math.max(current._labelQty || 0, qty);
+                });
+
+                const products = Array.from(grouped.values())
+                    .map(p => ({ product: p.product, total: Math.round(p.total * 10000) / 10000 }))
+                    .sort((a, b) => b.total - a.total);
 
                 if (window._locChartInstance) window._locChartInstance.destroy();
 
@@ -250,8 +289,25 @@
 
 
         let scannedDocument = null;
+        let productMasterLoaded = false;
+
+        async function loadProductMaster(force = false) {
+            if (productMasterLoaded && !force) return;
+            try {
+                const data = await apiGet("/api/product-master");
+                const list = document.getElementById("productOptions");
+                list.innerHTML = (data.products || [])
+                    .filter(p => p.status !== "Inactive")
+                    .map(p => `<option value="${esc(p.name)}"></option>`)
+                    .join("");
+                productMasterLoaded = true;
+            } catch (e) {
+                console.warn("Could not load Product Master:", e);
+            }
+        }
 
         function openLogModal() {
+            loadProductMaster();
             const modal = document.getElementById("logModal");
             const picker = document.getElementById("movementTypePicker");
             const form = document.getElementById("logForm");
@@ -303,6 +359,8 @@
                 if (!res.ok || !data.success) throw new Error(data.message || data.detail || "Could not save transaction.");
                 closeLogModal();
                 form.reset(); document.querySelector('input[name="action"][value="RECEIVE"]').checked = true;
+                productMasterLoaded = false;
+                await loadProductMaster(true);
                 showToast(data.message || "Inventory updated successfully.");
                 await loadCards(); await loadLocationChart(); await loadAgingList();
             } catch (err) { document.getElementById("logError").textContent = err.message; }
