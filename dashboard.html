@@ -38,7 +38,7 @@
         <div style="display:grid; grid-template-columns: 3fr 2fr; gap:20px;">
             <div class="section" style="margin:0;">
                 <div class="section-header">
-                    <h2>Stock by Location</h2>
+                    <h2>Stock by Product</h2>
                 </div>
                 <div style="position:relative; height:280px;">
                     <canvas id="locationChart"></canvas>
@@ -94,15 +94,24 @@
             <label>Serial number(s)<input name="serial_number" placeholder="e.g. DL-001, DL-002"></label>
             <label>Quantity *<input name="quantity" type="number" step="0.01" min="0.01" required placeholder="0"></label>
             <label>Unit<select name="unit"><option>units</option><option>pcs</option><option>boxes</option><option>kg</option><option>litres</option></select></label>
-            <label id="locationField">Warehouse *<input name="location" placeholder="e.g. Mumbai Warehouse"></label>
+            <label id="locationField">Warehouse *<select name="location" required>
+              <option value="Bhiwandi" selected>Bhiwandi</option>
+              <option value="Ghatkopar">Ghatkopar</option>
+            </select></label>
             <label id="storageLocationField">Exact storage location *<input name="storage_location" placeholder="e.g. Rack A3 / Shelf 2 / Bin 04"></label>
-            <label id="fromField" class="hidden-field">From location<input name="from_location" placeholder="Source warehouse"></label>
-            <label id="toField" class="hidden-field">To location<input name="to_location" placeholder="Destination warehouse"></label>
+            <label id="fromField" class="hidden-field">From warehouse<select name="from_location">
+              <option value="Bhiwandi" selected>Bhiwandi</option>
+              <option value="Ghatkopar">Ghatkopar</option>
+            </select></label>
+            <label id="toField" class="hidden-field">To warehouse<select name="to_location">
+              <option value="Bhiwandi">Bhiwandi</option>
+              <option value="Ghatkopar" selected>Ghatkopar</option>
+            </select></label>
             <label>Date received<input name="date_received" type="date"></label>
             <label>Reference / Bill No.<input name="reference_no" placeholder="e.g. DC-1024"></label>
             <label class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
           </div>
-          <div class="form-note">💡 <b>For Stock In, exact storage location is required.</b> Enter the rack, shelf, bin, bay, or cabinet where the product is physically kept. This makes it easy to find later.</div>
+          <div class="form-note">💡 <b>Warehouse is fixed to Bhiwandi or Ghatkopar.</b> Bhiwandi is selected by default. For Stock In, exact storage location is required — enter the rack, shelf, bin, bay, or cabinet where the product is physically kept.</div>
           <div id="logError" class="form-error"></div>
           <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeLogModal()">Cancel</button><button class="btn-primary-inline" id="saveLogBtn">Save to Inventory</button></div>
         </form>
@@ -167,25 +176,36 @@
         async function loadLocationChart() {
             try {
                 await waitForChart();
-                const data = await apiGet("/api/stock-by-location");
-                const locs = data.locations || [];
-                if (!locs.length) { document.getElementById("locationEmpty").style.display = "block"; return; }
+                const data = await apiGet("/api/products");
+                const products = data.products || [];
+                if (!products.length) { document.getElementById("locationEmpty").style.display = "block"; return; }
+
                 if (window._locChartInstance) window._locChartInstance.destroy();
+
                 window._locChartInstance = new Chart(document.getElementById("locationChart").getContext("2d"), {
                     type: "bar",
                     data: {
-                        labels: locs.map(l => l.location),
-                        datasets: [{ label: "Quantity in stock", data: locs.map(l => l.quantity),
-                                     backgroundColor: "#14968a", borderRadius: 6 }],
+                        labels: products.map(p => p.product),
+                        datasets: [{
+                            label: "Quantity in stock",
+                            data: products.map(p => p.total),
+                            backgroundColor: "#14968a",
+                            borderRadius: 6
+                        }],
                     },
                     options: {
-                        responsive: true, maintainAspectRatio: false,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        indexAxis: products.length >= 6 ? "y" : "x",
                         plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true } },
+                        scales: {
+                            x: { beginAtZero: true },
+                            y: { beginAtZero: true }
+                        },
                     },
                 });
             } catch (e) {
-                console.error("Location chart failed:", e);
+                console.error("Product stock chart failed:", e);
                 document.getElementById("locationEmpty").textContent =
                     "Chart couldn't load (" + e.message + "). Stock data itself is fine — check your connection and refresh.";
                 document.getElementById("locationEmpty").style.display = "block";
@@ -299,9 +319,9 @@
                 <td><input data-i="${i}" data-k="serial_number" value="${esc(r.serial_number)}"></td>
                 <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" value="${esc(r.quantity)}"></td>
                 <td><input data-i="${i}" data-k="unit" value="${esc(r.unit)}"></td>
-                <td><input data-i="${i}" data-k="location" value="${esc(r.location)}" placeholder="Warehouse"></td>
+                <td><select data-i="${i}" data-k="location"><option value="Bhiwandi" ${r.location==="Bhiwandi"?"selected":""}>Bhiwandi</option><option value="Ghatkopar" ${r.location==="Ghatkopar"?"selected":""}>Ghatkopar</option></select></td>
                 <td><input data-i="${i}" data-k="storage_location" value="${esc(r.storage_location || "")}" placeholder="Rack / Shelf / Bin"></td>
-                <td><input data-i="${i}" data-k="to_location" value="${esc(r.to_location || "")}" placeholder="Destination (transfer only)"></td>
+                <td><select data-i="${i}" data-k="to_location"><option value="">—</option><option value="Bhiwandi" ${r.to_location==="Bhiwandi"?"selected":""}>Bhiwandi</option><option value="Ghatkopar" ${r.to_location==="Ghatkopar"?"selected":""}>Ghatkopar</option></select></td>
                 <td><input data-i="${i}" data-k="reference_no" value="${esc(r.reference_no)}"></td>
               </tr>`).join("")}</tbody></table></div>` : '<div class="empty-note">No usable line items were found. Please enter the transaction manually.</div>';
             document.getElementById("saveScanBtn").style.display = drafts.length ? "inline-flex" : "none";
