@@ -119,6 +119,10 @@ LOG_HEADERS = ["Timestamp", "Original Message", "Action", "Product",
                "Serial Number", "Reference No.", "Document Type", "Delivery Address",
                "Storage Location", "Source Document"]
 
+PRODUCT_SHEET = "Products"
+PRODUCT_HEADERS = ["Product ID", "Product Name", "Normalized Name", "Status",
+                   "Created At", "Last Used", "Usage Count"]
+
 ACTIONS = {"RECEIVE", "DISPATCH", "TRANSFER", "ADJUST"}
 
 
@@ -187,6 +191,9 @@ class ExcelService:
         log = wb.create_sheet(LOG_SHEET)
         log.append(LOG_HEADERS)
         _style_header(log, LOG_HEADERS)
+        products = wb.create_sheet(PRODUCT_SHEET)
+        products.append(PRODUCT_HEADERS)
+        _style_header(products, PRODUCT_HEADERS)
         return wb
 
     @classmethod
@@ -219,6 +226,22 @@ class ExcelService:
             log = wb.create_sheet(LOG_SHEET)
             log.append(LOG_HEADERS)
             _style_header(log, LOG_HEADERS)
+        if PRODUCT_SHEET not in wb.sheetnames:
+            products = wb.create_sheet(PRODUCT_SHEET)
+            products.append(PRODUCT_HEADERS)
+            _style_header(products, PRODUCT_HEADERS)
+        else:
+            pws = wb[PRODUCT_SHEET]
+            existing = [pws.cell(1, c).value for c in range(1, pws.max_column + 1)]
+            for header in PRODUCT_HEADERS:
+                if header not in existing:
+                    pws.cell(1, pws.max_column + 1, header)
+                    existing.append(header)
+
+        # One-time/backward-compatible migration: any product already present in
+        # Batches becomes part of the Product Master automatically. This means an
+        # existing workbook gets the new master without manual cleanup.
+        cls.sync_product_master(wb)
         return wb
 
     @classmethod
@@ -251,9 +274,81 @@ class ExcelService:
             out.append(dict(zip(BATCH_HEADERS, row)))
         return out
 
+    @staticmethod
+    def normalize_product_name(value: str) -> str:
+        # Deliberately conservative: normalize case/whitespace only. We do not
+        # remove model numbers, hyphens, slashes, etc., because those can identify
+        # genuinely different products.
+        return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    @classmethod
+    def _product_ws(cls, wb: Workbook) -> Worksheet:
+        if PRODUCT_SHEET not in wb.sheetnames:
+            ws = wb.create_sheet(PRODUCT_SHEET)
+            ws.append(PRODUCT_HEADERS)
+            _style_header(ws, PRODUCT_HEADERS)
+        return wb[PRODUCT_SHEET]
+
+    @classmethod
+    def all_products(cls, wb: Workbook) -> List[dict]:
+        ws = cls._product_ws(wb)
+        return [dict(zip(PRODUCT_HEADERS, row)) for row in ws.iter_rows(min_row=2, values_only=True) if row[0] is not None]
+
+    @classmethod
+    def sync_product_master(cls, wb: Workbook):
+        ws = cls._product_ws(wb)
+        existing = {cls.normalize_product_name(row[1].value): row[0].row for row in ws.iter_rows(min_row=2) if row[0].value is not None and row[1].value}
+        next_id = 0
+        for row in ws.iter_rows(min_row=2):
+            if row[0].value is not None:
+                try:
+                    next_id = max(next_id, int(row[0].value))
+                except (TypeError, ValueError):
+                    pass
+        for b in cls.all_batches(wb):
+            name = str(b.get("Product") or "").strip()
+            key = cls.normalize_product_name(name)
+            if not key or key in existing:
+                continue
+            next_id += 1
+            now = datetime.now(timezone.utc).isoformat()
+            ws.append([next_id, re.sub(r"\s+", " ", name), key, "Active", now, now, 1])
+            existing[key] = ws.max_row
+
+    @classmethod
+    def resolve_product(cls, wb: Workbook, raw_name: str, create: bool = True) -> str:
+        name = re.sub(r"\s+", " ", str(raw_name or "").strip())
+        if not name:
+            raise ValueError("No product specified.")
+        ws = cls._product_ws(wb)
+        key = cls.normalize_product_name(name)
+        for row in ws.iter_rows(min_row=2):
+            if row[0].value is None:
+                continue
+            existing_name = str(row[1].value or "").strip()
+            existing_key = str(row[2].value or cls.normalize_product_name(existing_name)).strip()
+            if existing_key == key:
+                now = datetime.now(timezone.utc).isoformat()
+                row[3].value = "Active"
+                row[5].value = now
+                row[6].value = int(row[6].value or 0) + 1
+                return existing_name
+        if not create:
+            return name
+        max_id = 0
+        for row in ws.iter_rows(min_row=2):
+            try:
+                max_id = max(max_id, int(row[0].value or 0))
+            except (TypeError, ValueError):
+                pass
+        now = datetime.now(timezone.utc).isoformat()
+        ws.append([max_id + 1, name, key, "Active", now, now, 1])
+        return name
+
     @classmethod
     def known_products(cls, wb: Workbook) -> List[str]:
-        return sorted({b["Product"] for b in cls.all_batches(wb) if b["Product"]})
+        cls.sync_product_master(wb)
+        return sorted({str(p["Product Name"]).strip() for p in cls.all_products(wb) if p.get("Product Name")})
 
     @classmethod
     def known_locations(cls, wb: Workbook) -> List[str]:
@@ -572,6 +667,10 @@ class InventoryService:
             raise ValueError(f"Unknown action '{action}'.")
         if not product:
             raise ValueError("No product specified.")
+
+        # Product Master is the source of truth. Existing names are reused
+        # case-insensitively; genuinely new names are added automatically.
+        product = ExcelService.resolve_product(wb, product, create=True)
 
         if action == "RECEIVE":
             location = (parsed.get("location") or "").strip()
@@ -1118,6 +1217,18 @@ def undo():
 def transactions(limit: int = 50):
     wb = ExcelService.load_live_workbook()
     return {"transactions": ExcelService.get_log_rows(wb, limit)}
+
+
+@app.get("/api/product-master")
+def product_master():
+    """Product autocomplete/master list. New products are created by the same
+    logging flow, so users never need to maintain a second list manually."""
+    wb = ExcelService.load_live_workbook()
+    items = ExcelService.all_products(wb)
+    return {"products": [
+        {"id": p["Product ID"], "name": p["Product Name"], "status": p.get("Status") or "Active"}
+        for p in items if p.get("Product Name")
+    ]}
 
 
 @app.get("/api/products")
