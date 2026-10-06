@@ -94,14 +94,15 @@
             <label>Serial number(s)<input name="serial_number" placeholder="e.g. DL-001, DL-002"></label>
             <label>Quantity *<input name="quantity" type="number" step="0.01" min="0.01" required placeholder="0"></label>
             <label>Unit<select name="unit"><option>units</option><option>pcs</option><option>boxes</option><option>kg</option><option>litres</option></select></label>
-            <label id="locationField">Location *<input name="location" placeholder="e.g. Mumbai Warehouse"></label>
+            <label id="locationField">Warehouse *<input name="location" placeholder="e.g. Mumbai Warehouse"></label>
+            <label id="storageLocationField">Exact storage location *<input name="storage_location" placeholder="e.g. Rack A3 / Shelf 2 / Bin 04"></label>
             <label id="fromField" class="hidden-field">From location<input name="from_location" placeholder="Source warehouse"></label>
             <label id="toField" class="hidden-field">To location<input name="to_location" placeholder="Destination warehouse"></label>
             <label>Date received<input name="date_received" type="date"></label>
             <label>Reference / Bill No.<input name="reference_no" placeholder="e.g. DC-1024"></label>
             <label class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
           </div>
-          <div class="form-note">💡 <b>Serial number is optional.</b> Add it when the product is individually identifiable.</div>
+          <div class="form-note">💡 <b>For Stock In, exact storage location is required.</b> Enter the rack, shelf, bin, bay, or cabinet where the product is physically kept. This makes it easy to find later.</div>
           <div id="logError" class="form-error"></div>
           <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeLogModal()">Cancel</button><button class="btn-primary-inline" id="saveLogBtn">Save to Inventory</button></div>
         </form>
@@ -224,9 +225,11 @@
         function updateActionFields() {
             const action = document.querySelector('input[name="action"]:checked').value;
             document.getElementById("locationField").classList.toggle("hidden-field", action === "TRANSFER");
+            document.getElementById("storageLocationField").classList.toggle("hidden-field", action !== "RECEIVE");
             document.getElementById("fromField").classList.toggle("hidden-field", action !== "TRANSFER");
             document.getElementById("toField").classList.toggle("hidden-field", action !== "TRANSFER");
             document.getElementById("locationField").querySelector("input").required = action !== "TRANSFER";
+            document.getElementById("storageLocationField").querySelector("input").required = action === "RECEIVE";
             document.getElementById("fromField").querySelector("input").required = action === "TRANSFER";
             document.getElementById("toField").querySelector("input").required = action === "TRANSFER";
         }
@@ -289,7 +292,7 @@
             const drafts=data.drafts || [];
             document.getElementById("scanDrafts").innerHTML = drafts.length ? `
               <div class="review-title">Items to log — click any value to correct it</div>
-              <div class="review-table-wrap"><table class="data-table review-table"><thead><tr><th>Action</th><th>Product</th><th>Serial No.</th><th>Qty</th><th>Unit</th><th>Location / From</th><th>To</th><th>Reference</th></tr></thead>
+              <div class="review-table-wrap"><table class="data-table review-table"><thead><tr><th>Action</th><th>Product</th><th>Serial No.</th><th>Qty</th><th>Unit</th><th>Warehouse / From</th><th>Exact Storage</th><th>To</th><th>Reference</th></tr></thead>
               <tbody>${drafts.map((r,i)=>`<tr>
                 <td><select data-i="${i}" data-k="action"><option ${r.action==="RECEIVE"?"selected":""}>RECEIVE</option><option ${r.action==="DISPATCH"?"selected":""}>DISPATCH</option><option ${r.action==="TRANSFER"?"selected":""}>TRANSFER</option></select></td>
                 <td><input data-i="${i}" data-k="product" value="${esc(r.product)}"></td>
@@ -297,6 +300,7 @@
                 <td><input data-i="${i}" data-k="quantity" type="number" step="0.01" value="${esc(r.quantity)}"></td>
                 <td><input data-i="${i}" data-k="unit" value="${esc(r.unit)}"></td>
                 <td><input data-i="${i}" data-k="location" value="${esc(r.location)}" placeholder="Warehouse"></td>
+                <td><input data-i="${i}" data-k="storage_location" value="${esc(r.storage_location || "")}" placeholder="Rack / Shelf / Bin"></td>
                 <td><input data-i="${i}" data-k="to_location" value="${esc(r.to_location || "")}" placeholder="Destination (transfer only)"></td>
                 <td><input data-i="${i}" data-k="reference_no" value="${esc(r.reference_no)}"></td>
               </tr>`).join("")}</tbody></table></div>` : '<div class="empty-note">No usable line items were found. Please enter the transaction manually.</div>';
