@@ -281,12 +281,12 @@ class ExcelService:
     @classmethod
     def active_batches_fifo(cls, wb: Workbook, product: str, location: str):
         """Active batch ROWS (cell objects) for an exact product+location,
-        based on Qty Remaining > 0. Matching is case-insensitive/trimmed."""
+        oldest Date Received first. Matching is case-insensitive/trimmed."""
         rows = []
         for row in cls._batch_rows(wb):
             if (str(row[1].value).strip().lower() == product.strip().lower()
                     and str(row[2].value).strip().lower() == location.strip().lower()
-                    and (row[6].value or 0) > 0):
+                    and (row[5].value or 0) > 0):
                 rows.append(row)
         rows.sort(key=lambda r: str(r[3].value))
         return rows
@@ -303,15 +303,12 @@ class ExcelService:
         for row in cls.active_batches_fifo(wb, product, location):
             if remaining_needed <= 0:
                 break
-            # Qty Remaining is column G (index 6). Never consume from
-            # Qty Received (column F / index 5), which is the immutable
-            # original batch quantity.
-            available = row[6].value or 0
+            available = row[5].value or 0
             take = min(available, remaining_needed)
             if take <= 0:
                 continue
-            row[6].value = round(available - take, 4)
-            row[8].value = "Active" if row[6].value > 0 else "Depleted"
+            row[5].value = round(available - take, 4)
+            row[7].value = "Active" if row[5].value > 0 else "Depleted"
             breakdown.append({"batch_id": row[0].value, "date_received": str(row[3].value),
                                "qty_taken": take})
             remaining_needed -= take
@@ -327,9 +324,8 @@ class ExcelService:
             row = rows_by_id.get(item["batch_id"])
             if row is None:
                 continue
-            # Restore Qty Remaining (column G / index 6), not Qty Received.
-            row[6].value = round((row[6].value or 0) + item["qty_taken"], 4)
-            row[8].value = "Active"
+            row[5].value = round((row[5].value or 0) + item["qty_taken"], 4)
+            row[7].value = "Active"
 
     @classmethod
     def stock_summary(cls, wb: Workbook, product: Optional[str] = None):
@@ -791,20 +787,57 @@ Our own delivery/warehouse addresses: {own_addresses}
             company_name=OWN_COMPANY_NAME or "(not configured)",
             own_addresses=OWN_DELIVERY_ADDRESSES or "(not configured; use known internal locations where possible)",
         )
+        # Use the canonical Gemini REST JSON field names here.  This is important
+        # for Vercel/serverless deployments: the API accepts the protobuf JSON
+        # representation, but the REST field names should be camelCase.
         payload = {
-            "system_instruction": {"parts": [{"text": prompt}]},
+            "systemInstruction": {"parts": [{"text": prompt}]},
             "contents": [{
                 "role": "user",
                 "parts": [
                     {"text": f"Extract this inventory document. Filename: {filename}"},
-                    {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(raw).decode("ascii")}}
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": base64.b64encode(raw).decode("ascii")
+                        }
+                    }
                 ]
             }],
-            "generationConfig": {"temperature": 0.0, "response_mime_type": "application/json"},
+            "generationConfig": {
+                "temperature": 0.0,
+                "responseMimeType": "application/json"
+            },
         }
-        resp = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}", json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+
+        # Keep the API key out of the URL and send it using Google's documented
+        # authentication header. This also makes failures easier to diagnose.
+        try:
+            resp = requests.post(
+                GEMINI_URL,
+                headers={
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"Could not reach Gemini API: {e}") from e
+
+        if not resp.ok:
+            try:
+                error_body = resp.json()
+            except ValueError:
+                error_body = resp.text[:2000]
+            raise RuntimeError(
+                f"Gemini API returned HTTP {resp.status_code}: {error_body}"
+            )
+
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise RuntimeError(f"Gemini returned a non-JSON response: {resp.text[:2000]}") from e
         try:
             text = data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError) as e:
