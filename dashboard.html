@@ -107,7 +107,7 @@
               <option value="Bhiwandi">Bhiwandi</option>
               <option value="Ghatkopar" selected>Ghatkopar</option>
             </select></label>
-            <label>Date received<input name="date_received" type="date"></label>
+            <label id="dateFieldLabel">Date received<input name="date_received" type="date"></label>
             <label>Reference / Bill No.<input name="reference_no" placeholder="e.g. DC-1024"></label>
             <label class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
           </div>
@@ -248,10 +248,11 @@
             document.getElementById("storageLocationField").classList.toggle("hidden-field", action !== "RECEIVE");
             document.getElementById("fromField").classList.toggle("hidden-field", action !== "TRANSFER");
             document.getElementById("toField").classList.toggle("hidden-field", action !== "TRANSFER");
-            document.getElementById("locationField").querySelector("input").required = action !== "TRANSFER";
+            document.getElementById("locationField").querySelector("select").required = action !== "TRANSFER";
             document.getElementById("storageLocationField").querySelector("input").required = action === "RECEIVE";
-            document.getElementById("fromField").querySelector("input").required = action === "TRANSFER";
-            document.getElementById("toField").querySelector("input").required = action === "TRANSFER";
+            document.getElementById("fromField").querySelector("select").required = action === "TRANSFER";
+            document.getElementById("toField").querySelector("select").required = action === "TRANSFER";
+            document.getElementById("dateFieldLabel").firstChild.textContent = action === "DISPATCH" ? "Date dispatched" : action === "TRANSFER" ? "Date transferred" : action === "ADJUST" ? "Date adjusted" : "Date received";
         }
 
         async function submitLog(e) {
