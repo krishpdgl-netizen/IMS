@@ -78,6 +78,16 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH") or "main"
 EXCEL_PATH = os.environ.get("EXCEL_PATH") or "data/inventory_data.xlsx"
 ACCESS_CODE = os.environ.get("ACCESS_CODE") or "inventory2026"
 
+# Fixed warehouse master list. Do not accept free-text warehouse names;
+# this prevents accidental variants such as "bhiwandi branch", "Delhi", etc.
+WAREHOUSE_OPTIONS = ["Bhiwandi", "Ghatkopar"]
+
+def validate_warehouse(value: str, field_name: str = "Warehouse") -> str:
+    value = (value or "").strip()
+    if value not in WAREHOUSE_OPTIONS:
+        raise ValueError(f"{field_name} must be one of: {', '.join(WAREHOUSE_OPTIONS)}.")
+    return value
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or ""
 GEMINI_MODEL = "gemini-3.1-flash-lite"  # fixed per requirements - do not swap models
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -450,10 +460,10 @@ fences, no commentary) matching exactly one of these shapes:
   "type": "movement",
   "action": "RECEIVE" | "DISPATCH" | "TRANSFER" | "ADJUST",
   "product": "<name>",
-  "location": "<warehouse name>", // required for RECEIVE, DISPATCH, ADJUST
+  "location": "Bhiwandi" | "Ghatkopar", // required for RECEIVE, DISPATCH, ADJUST
   "storage_location": "<exact rack/shelf/bin location>", // required for RECEIVE; optional otherwise
-  "from_location": "<name>",       // required for TRANSFER only
-  "to_location": "<name>",         // required for TRANSFER only
+  "from_location": "Bhiwandi" | "Ghatkopar", // required for TRANSFER only
+  "to_location": "Bhiwandi" | "Ghatkopar",   // required for TRANSFER only
   "quantity": <number>,             // for ADJUST, positive = found extra stock, negative = write-off/loss/damage
   "unit": "<e.g. units, boxes, kg>",
   "date_received": "YYYY-MM-DD"     // only for RECEIVE. ONLY fill this in if the
@@ -482,16 +492,15 @@ RULES:
   ("yesterday", "last Monday", "3 days ago"), resolve it against this real
   date - never against your own guess of what today is.
 - KNOWN PRODUCTS SO FAR: {known_products}
-- KNOWN LOCATIONS SO FAR: {known_locations}
-- These "known" lists exist ONLY to help you reuse the exact existing
-  spelling when the message clearly refers to something already in the
-  list (different casing, singular/plural, minor typo). They are NOT a
-  restriction. A product or location that is NOT in these lists is
-  completely normal and expected - this system is designed to let new
-  products and new locations be created the first time they're
-  mentioned. For a RECEIVE/movement message, a product or location being
-  unfamiliar is NEVER a reason to reject it or return "unknown" - just
-  use the name exactly as given in the message.
+- APPROVED WAREHOUSES: Bhiwandi, Ghatkopar.
+- Warehouse/location is NOT free text. For RECEIVE, DISPATCH, ADJUST and
+  TRANSFER, normalize warehouse names to exactly "Bhiwandi" or "Ghatkopar".
+  Never create or preserve variants such as "bhiwandi branch", "Bhiwandi
+  Warehouse", "Delhi", etc. If the message clearly means one of the two
+  approved warehouses, use that exact spelling; otherwise let the backend
+  reject the invalid warehouse rather than inventing a new one.
+- The known product list exists only to help reuse exact product spelling.
+  New products are allowed. New warehouses are NOT allowed.
 - "received", "arrived", "bought", "purchased", "added to stock", "brought in",
   "we have X of <product>" (describing stock that exists/arrived)
   -> RECEIVE.
@@ -568,6 +577,7 @@ class InventoryService:
             location = (parsed.get("location") or "").strip()
             if not location:
                 raise ValueError("No warehouse specified for received stock.")
+            location = validate_warehouse(location, "Warehouse")
             if not storage_location:
                 raise ValueError("Please enter the exact warehouse storage location (for example: Rack A3 / Shelf 2 / Bin 04).")
             if not qty or qty <= 0:
@@ -587,6 +597,7 @@ class InventoryService:
             location = (parsed.get("location") or "").strip()
             if not location:
                 raise ValueError("No location specified for dispatch.")
+            location = validate_warehouse(location, "Warehouse")
             if not qty or qty <= 0:
                 raise ValueError("Quantity to dispatch must be a positive number.")
             breakdown, shortfall = ExcelService.consume_fifo(wb, product, location, qty)
@@ -613,6 +624,8 @@ class InventoryService:
             to_location = (parsed.get("to_location") or "").strip()
             if not from_location or not to_location:
                 raise ValueError("Both from_location and to_location are required for a transfer.")
+            from_location = validate_warehouse(from_location, "From warehouse")
+            to_location = validate_warehouse(to_location, "To warehouse")
             if not qty or qty <= 0:
                 raise ValueError("Quantity to transfer must be a positive number.")
             breakdown, shortfall = ExcelService.consume_fifo(wb, product, from_location, qty)
@@ -639,6 +652,7 @@ class InventoryService:
             location = (parsed.get("location") or "").strip()
             if not location:
                 raise ValueError("No location specified for the adjustment.")
+            location = validate_warehouse(location, "Warehouse")
             if qty is None or qty == 0:
                 raise ValueError("Adjustment quantity must be a non-zero number.")
             if qty > 0:
@@ -1098,7 +1112,10 @@ def stock_by_location():
     for product, locs in summary.items():
         for loc, q in locs.items():
             totals[loc] = round(totals.get(loc, 0) + q, 4)
-    return {"locations": [{"location": l, "quantity": q} for l, q in sorted(totals.items(), key=lambda x: -x[1])]}
+    # Dashboard location chart is intentionally limited to the approved warehouse master list.
+    # Legacy/free-text locations remain in the ledger for auditability but cannot create new chart categories.
+    return {"locations": [{"location": l, "quantity": round(totals.get(l, 0), 4)}
+                          for l in WAREHOUSE_OPTIONS if totals.get(l, 0) > 0]}
 
 
 @app.get("/api/dashboard-summary")
