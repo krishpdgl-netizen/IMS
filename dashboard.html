@@ -80,8 +80,23 @@
     <!-- Manual transaction modal -->
     <div class="modal-backdrop" id="logModal" onclick="if(event.target===this)closeLogModal()">
       <div class="modal">
-        <div class="modal-head"><div><h2>Log Stock Movement</h2><p>Fill only what you know. The system will stop you if something is missing.</p></div><button class="modal-close" onclick="closeLogModal()">×</button></div>
-        <form id="logForm" onsubmit="submitLog(event)">
+        <div class="modal-head"><div><h2>Log Stock Movement</h2><p id="logModalSubtitle">First choose what happened. This prevents the wrong transaction type from being logged.</p></div><button class="modal-close" onclick="closeLogModal()">×</button></div>
+
+        <!-- Step 1: force the user to choose the movement type before seeing the form. -->
+        <div id="movementTypePicker">
+          <div class="form-section-title">1. What happened?</div>
+          <p style="margin:-3px 0 14px;color:var(--ink-600);font-size:12.5px;">Choose the transaction type first. You can change it again on the next screen.</p>
+          <div class="action-choice">
+            <label onclick="chooseMovementType('RECEIVE')"><span>📥 <b>Stock In</b><small>Goods received into inventory</small></span></label>
+            <label onclick="chooseMovementType('DISPATCH')"><span>📤 <b>Stock Out</b><small>Goods sent to a customer</small></span></label>
+            <label onclick="chooseMovementType('TRANSFER')"><span>↔ <b>Transfer</b><small>Move stock between warehouses</small></span></label>
+            <label onclick="chooseMovementType('ADJUST')"><span>⚙ <b>Adjustment</b><small>Correction, damage or count</small></span></label>
+          </div>
+          <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeLogModal()">Cancel</button></div>
+        </div>
+
+        <!-- Step 2: the actual transaction form. The same four choices remain at the top. -->
+        <form id="logForm" onsubmit="submitLog(event)" style="display:none;">
           <div class="form-section-title">1. What happened?</div>
           <div class="action-choice">
             <label><input type="radio" name="action" value="RECEIVE" checked onchange="updateActionFields()"><span>📥 <b>Stock In</b><small>Goods received</small></span></label>
@@ -238,9 +253,28 @@
         let scannedDocument = null;
 
         function openLogModal() {
-            document.getElementById("logModal").classList.add("open");
-            updateActionFields();
+            const modal = document.getElementById("logModal");
+            const picker = document.getElementById("movementTypePicker");
+            const form = document.getElementById("logForm");
+            const subtitle = document.getElementById("logModalSubtitle");
+            modal.classList.add("open");
+            picker.style.display = "block";
+            form.style.display = "none";
+            subtitle.textContent = "First choose what happened. This prevents the wrong transaction type from being logged.";
+            document.getElementById("logError").textContent = "";
         }
+
+        function chooseMovementType(action) {
+            const radio = document.querySelector(`input[name="action"][value="${action}"]`);
+            if (!radio) return;
+            radio.checked = true;
+            document.getElementById("movementTypePicker").style.display = "none";
+            document.getElementById("logForm").style.display = "block";
+            document.getElementById("logModalSubtitle").textContent = "Review the movement type above, then enter the transaction details.";
+            updateActionFields();
+            document.getElementById("logForm").querySelector('input[name="product"]').focus();
+        }
+
         function closeLogModal() { document.getElementById("logModal").classList.remove("open"); }
         function updateActionFields() {
             const action = document.querySelector('input[name="action"]:checked').value;
