@@ -85,12 +85,13 @@
             if (!rows.length) { document.getElementById("agingEmpty").style.display = "block"; return; }
             document.getElementById("agingTable").innerHTML = `
                 <table class="data-table">
-                    <thead><tr><th>Product</th><th>Location</th><th>Qty</th><th>Date Received</th><th>Age</th></tr></thead>
+                    <thead><tr><th>Product</th><th>Warehouse</th><th>Exact Storage</th><th>Qty</th><th>Date Received</th><th>Age</th></tr></thead>
                     <tbody>
                         ${rows.map(r => `
                             <tr>
                                 <td>${r.Product}</td>
                                 <td>${r.Location}</td>
+                                <td>${r["Storage Location"] || "—"}</td>
                                 <td>${fmtQty(r["Qty Remaining"])} ${r.Unit || ""}</td>
                                 <td>${r["Date Received"]}</td>
                                 <td>${agingPill(r["Age Days"], data.threshold_days)}</td>
