@@ -281,12 +281,12 @@ class ExcelService:
     @classmethod
     def active_batches_fifo(cls, wb: Workbook, product: str, location: str):
         """Active batch ROWS (cell objects) for an exact product+location,
-        oldest Date Received first. Matching is case-insensitive/trimmed."""
+        based on Qty Remaining > 0. Matching is case-insensitive/trimmed."""
         rows = []
         for row in cls._batch_rows(wb):
             if (str(row[1].value).strip().lower() == product.strip().lower()
                     and str(row[2].value).strip().lower() == location.strip().lower()
-                    and (row[5].value or 0) > 0):
+                    and (row[6].value or 0) > 0):
                 rows.append(row)
         rows.sort(key=lambda r: str(r[3].value))
         return rows
@@ -303,12 +303,15 @@ class ExcelService:
         for row in cls.active_batches_fifo(wb, product, location):
             if remaining_needed <= 0:
                 break
-            available = row[5].value or 0
+            # Qty Remaining is column G (index 6). Never consume from
+            # Qty Received (column F / index 5), which is the immutable
+            # original batch quantity.
+            available = row[6].value or 0
             take = min(available, remaining_needed)
             if take <= 0:
                 continue
-            row[5].value = round(available - take, 4)
-            row[7].value = "Active" if row[5].value > 0 else "Depleted"
+            row[6].value = round(available - take, 4)
+            row[8].value = "Active" if row[6].value > 0 else "Depleted"
             breakdown.append({"batch_id": row[0].value, "date_received": str(row[3].value),
                                "qty_taken": take})
             remaining_needed -= take
@@ -324,8 +327,9 @@ class ExcelService:
             row = rows_by_id.get(item["batch_id"])
             if row is None:
                 continue
-            row[5].value = round((row[5].value or 0) + item["qty_taken"], 4)
-            row[7].value = "Active"
+            # Restore Qty Remaining (column G / index 6), not Qty Received.
+            row[6].value = round((row[6].value or 0) + item["qty_taken"], 4)
+            row[8].value = "Active"
 
     @classmethod
     def stock_summary(cls, wb: Workbook, product: Optional[str] = None):
