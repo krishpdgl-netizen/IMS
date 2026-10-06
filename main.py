@@ -286,7 +286,7 @@ class ExcelService:
         for row in cls._batch_rows(wb):
             if (str(row[1].value).strip().lower() == product.strip().lower()
                     and str(row[2].value).strip().lower() == location.strip().lower()
-                    and (row[5].value or 0) > 0):
+                    and (row[6].value or 0) > 0):
                 rows.append(row)
         rows.sort(key=lambda r: str(r[3].value))
         return rows
@@ -303,12 +303,12 @@ class ExcelService:
         for row in cls.active_batches_fifo(wb, product, location):
             if remaining_needed <= 0:
                 break
-            available = row[5].value or 0
+            available = float(row[6].value or 0)
             take = min(available, remaining_needed)
             if take <= 0:
                 continue
-            row[5].value = round(available - take, 4)
-            row[7].value = "Active" if row[5].value > 0 else "Depleted"
+            row[6].value = round(available - take, 4)
+            row[8].value = "Active" if row[6].value > 0 else "Depleted"
             breakdown.append({"batch_id": row[0].value, "date_received": str(row[3].value),
                                "qty_taken": take})
             remaining_needed -= take
@@ -324,8 +324,8 @@ class ExcelService:
             row = rows_by_id.get(item["batch_id"])
             if row is None:
                 continue
-            row[5].value = round((row[5].value or 0) + item["qty_taken"], 4)
-            row[7].value = "Active"
+            row[6].value = round((float(row[6].value or 0) + float(item["qty_taken"])), 4)
+            row[8].value = "Active"
 
     @classmethod
     def stock_summary(cls, wb: Workbook, product: Optional[str] = None):
@@ -406,8 +406,8 @@ class ExcelService:
             for item in reversal_data:
                 for row in cls._batch_rows(wb):
                     if row[0].value == item["batch_id"]:
-                        row[5].value = 0
-                        row[7].value = "Depleted"
+                        row[6].value = 0
+                        row[8].value = "Depleted"
         elif action == "DISPATCH":
             cls.restore_fifo(wb, reversal_data)
         elif action == "ADJUST":
@@ -416,8 +416,8 @@ class ExcelService:
                 for item in reversal_data:
                     for row in cls._batch_rows(wb):
                         if row[0].value == item["batch_id"]:
-                            row[5].value = 0
-                            row[7].value = "Depleted"
+                            row[6].value = 0
+                            row[8].value = "Depleted"
             else:
                 cls.restore_fifo(wb, reversal_data)
         elif action == "TRANSFER":
@@ -426,8 +426,8 @@ class ExcelService:
             for bid in reversal_data.get("created_batch_ids", []):
                 for row in cls._batch_rows(wb):
                     if row[0].value == bid:
-                        row[5].value = 0
-                        row[7].value = "Depleted"
+                        row[6].value = 0
+                        row[8].value = "Depleted"
 
         ws.cell(row=target_row, column=10, value="Reversed")
         cls.append_log(wb, f"UNDO: {ws.cell(row=target_row, column=2).value}", action, product,
@@ -967,11 +967,17 @@ async def scan_document(file: UploadFile = File(...)):
     if mime not in allowed:
         raise HTTPException(400, "Please upload a PDF or image (JPG, PNG, WEBP, HEIC).")
     raw = await file.read()
-    if len(raw) > 15 * 1024 * 1024:
-        raise HTTPException(413, "Document is too large. Please keep it under 15 MB.")
+    # Vercel Serverless Functions have a request payload limit, so an inline
+    # document upload must stay comfortably below that limit. Base64 encoding
+    # also increases the payload size by roughly 33%.
+    if len(raw) > 3 * 1024 * 1024:
+        raise HTTPException(413, "Document is too large for Vercel upload. Please keep it under 3 MB.")
     try:
-        wb = ExcelService.load_live_workbook()
-        parsed = DocumentIntelligence.parse(raw, mime, file.filename, ExcelService.known_locations(wb))
+        # Do NOT load the GitHub-backed Excel workbook just to scan a document.
+        # Scanning is read-only and our warehouse master is fixed, so using the
+        # fixed options here prevents a GitHub/API failure from breaking the
+        # document scanner before Gemini is even called.
+        parsed = DocumentIntelligence.parse(raw, mime, file.filename, WAREHOUSE_OPTIONS)
         # Convert document-level extraction into ready-to-review transaction drafts.
         direction = str(parsed.get("direction") or "UNKNOWN").upper()
         action = {"INWARD": "RECEIVE", "OUTWARD": "DISPATCH", "INTERNAL": "TRANSFER"}.get(direction, "UNKNOWN")
