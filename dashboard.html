@@ -23,7 +23,10 @@
             <h1>Inventory Dashboard</h1>
             <div class="header-actions">
                 <button class="btn-action btn-log" onclick="openLogModal()">＋ Log Stock</button>
-                <a class="btn-action" href="https://demotracker-blond.vercel.app/" target="_blank" rel="noopener noreferrer">▣ Sample/Demo Unit Log</a>
+                <a class="btn-action btn-demo"
+                   href="https://demotracker-blond.vercel.app/">
+                    Sample/Demo Unit Log
+                </a>
                 <button class="btn-action btn-scan" onclick="document.getElementById('documentInput').click()">⌕ Scan Bill</button>
                 <input id="documentInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.gif" hidden onchange="scanDocument(this)">
                 <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
