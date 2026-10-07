@@ -124,6 +124,18 @@ table.data-table td { padding: 9px 10px; border-bottom: 1px solid #f0f0f0; }
 table.data-table tr:hover td { background: #fafcfc; }
 .empty-note { color: var(--ink-400); font-size: 13px; text-align: center; padding: 18px 0; }
 
+
+.btn-demo {
+    background: #0f766e;
+    color: white;
+    border: none;
+}
+
+.btn-demo:hover {
+    background: #0d625c;
+}
+
+
 /* ---------- Chat assistant ---------- */
 .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 160px); }
 .chat-log { flex: 1; overflow-y: auto; padding: 6px 4px 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -243,3 +255,4 @@ table.data-table tr:hover td { background: #fafcfc; }
   .action-grid { grid-template-columns:1fr; }
   .header-actions { width:100%; flex-wrap:wrap; }
 }
+
