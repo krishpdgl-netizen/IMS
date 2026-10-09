@@ -111,7 +111,7 @@
             <label><input type="radio" name="action" value="PRODUCE" onchange="updateActionFields()"><span>🏭 <b>Assemble</b><small>Build from parts</small></span></label>
           </div>
           <div class="form-grid">
-            <label data-for="RECEIVE">Inward type *<select name="inward_type">
+            <label data-for="RECEIVE">Inward type *<select name="inward_type" onchange="updateActionFields()">
               <option value="CBU">CBU – finished units, ready to sell</option>
               <option value="SKD">SKD – semi knocked down (needs assembly)</option>
               <option value="CKD">CKD – loose parts / kits</option>
@@ -151,6 +151,16 @@
             <label data-for="all" class="wide"><span id="serialLabel">Serial number(s)</span>
               <textarea name="serial_number" rows="2" placeholder="One per line or comma separated, e.g. DL-001, DL-002" oninput="countSerials(this)"></textarea>
               <small id="serialCount" style="display:block;margin-top:4px;color:var(--ink-600);font-size:11.5px;"></small></label>
+            <div id="kitBox" class="wide kit-box hidden-field">
+              <label>Parent product *<input name="parent_product" list="productOptions" autocomplete="off" placeholder="e.g. Panache 43in Smart TV"></label>
+              <div class="kit-head"><span>Components of this parent product</span><span id="kitCount"></span></div>
+              <div id="kitRows"></div>
+              <button type="button" class="btn-secondary kit-add" onclick="addKitRow()">＋ Add component</button>
+              <div class="form-grid" style="margin-top:12px;">
+                <label>Number of sets in this shipment<input name="kits_count" type="number" min="1" step="1" placeholder="e.g. 5 (optional)"></label>
+                <label class="kit-check"><input type="checkbox" name="save_bom" checked><span>Remember these parts as the parts list for this product (first time only), so Assemble works</span></label>
+              </div>
+            </div>
             <label data-for="DISPATCH" class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
             <details data-for="RECEIVE" class="wide more-details">
               <summary>Import &amp; extra details (optional)</summary>
@@ -165,8 +175,6 @@
                 <label>Damaged qty<input name="damaged_qty" type="number" step="any" min="0"></label>
                 <label>Unit price<input name="unit_price" type="number" step="any" min="0"></label>
                 <label>Currency<select name="currency"><option value="">Auto</option><option>USD</option><option>CNY</option><option>INR</option><option>EUR</option></select></label>
-                <label>Kits are for model (SKD/CKD)<input name="kit_for_item" list="productOptions"></label>
-                <label>No. of kits<input name="kits_count" type="number" min="0" step="1"></label>
                 <label>Product type<select name="item_type"><option value="">Auto from inward type</option><option value="FG">Finished good</option><option value="SUB_ASSEMBLY">Semi-built (SKD)</option><option value="PART">Part (CKD)</option><option value="SPARE">Spare</option><option value="PACKING">Packing</option><option value="CONSUMABLE">Consumable</option></select></label>
                 <label class="wide">Damaged unit serials<textarea name="damaged_serials" rows="2"></textarea></label>
               </div>
@@ -411,6 +419,39 @@
             f.reason.required = action === "ADJUST";
             f.storage_location.required = ["RECEIVE", "TRANSFER", "PRODUCE"].includes(action);
             f.quantity.min = action === "ADJUST" ? "" : "0";
+
+            // SKD / CKD: parent product + any number of components instead of one product line
+            const kit = action === "RECEIVE" && ["SKD", "CKD"].includes(f.inward_type.value);
+            ["product", "quantity", "unit", "serial_number", "invoice_qty", "damaged_qty", "unit_price", "item_type", "damaged_serials"]
+                .forEach(n => { const l = f[n] && f[n].closest("label"); if (!l) return; if (kit) l.classList.add("hidden-field"); else if (!l.dataset.for) l.classList.remove("hidden-field"); });
+            document.getElementById("kitBox").classList.toggle("hidden-field", !kit);
+            f.product.required = !kit;
+            f.quantity.required = !kit;
+            f.parent_product.required = kit;
+            if (kit) {
+                if (!document.querySelectorAll("#kitRows .kit-row").length) { addKitRow(); addKitRow(); }
+                document.getElementById("formNote").innerHTML = "💡 Type the <b>parent product</b> (the model these parts are for), then add every part that came in under it. New parts are created automatically. Add serial numbers only for parts you track one by one.";
+            }
+        }
+        function addKitRow(v = {}) {
+            const row = document.createElement("div");
+            row.className = "kit-row";
+            row.innerHTML = `<input class="k-item" list="productOptions" placeholder="Component name" autocomplete="off" value="${esc(v.item || "")}">
+                <input class="k-qty" type="number" min="0" step="any" placeholder="Qty" value="${esc(v.qty || "")}">
+                <textarea class="k-serials" rows="1" placeholder="Serial numbers (optional)"></textarea>
+                <button type="button" class="kit-del" title="Remove" onclick="this.parentElement.remove();kitCount()">×</button>`;
+            document.getElementById("kitRows").appendChild(row);
+            kitCount();
+        }
+        function kitCount() {
+            const n = document.querySelectorAll("#kitRows .kit-row").length;
+            document.getElementById("kitCount").textContent = n + " component" + (n === 1 ? "" : "s");
+        }
+        function collectKit() {
+            return [...document.querySelectorAll("#kitRows .kit-row")].map(r => ({
+                item: r.querySelector(".k-item").value.trim(), qty: Number(r.querySelector(".k-qty").value),
+                serials: r.querySelector(".k-serials").value.trim()
+            })).filter(c => c.item || c.qty || c.serials);
         }
         function countSerials(el) {
             const n = el.value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean).length;
@@ -423,6 +464,12 @@
             const fd = new FormData(form), body = Object.fromEntries(fd.entries());
             body.action = body.action.toUpperCase();
             body.quantity = Number(body.quantity);
+            if (body.action === "RECEIVE" && ["SKD", "CKD"].includes(body.inward_type)) {
+                body.components = collectKit();
+                body.save_bom = form.save_bom.checked;
+                body.product = body.parent_product;
+                if (!body.components.length) { document.getElementById("logError").textContent = "Add at least one component under the parent product."; return; }
+            }
             body.entered_by = localStorage.getItem("userName") || "Dashboard User";
             btn.disabled = true; btn.textContent = "Saving…";
             document.getElementById("logError").textContent = "";
@@ -432,6 +479,7 @@
                 if (!res.ok || !data.success) throw new Error(data.message || data.detail || "Could not save transaction.");
                 closeLogModal();
                 form.reset(); document.querySelector('input[name="action"][value="RECEIVE"]').checked = true; document.getElementById("serialCount").textContent = "";
+                document.getElementById("kitRows").innerHTML = ""; kitCount();
                 productMasterLoaded = false;
                 await loadProductMaster(true);
                 showToast(data.message || "Inventory updated successfully.");
