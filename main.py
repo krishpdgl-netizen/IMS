@@ -739,7 +739,10 @@ class Book:
                 raise ValueError(f"Item '{rec['Item Name']}' is marked Inactive.")
             return rec
         if not line.get("item_type"):
-            raise ValueError(f"Item '{ref}' is new - choose its item type (and serialized Y/N) so it can be added to the Item Master.")
+            if not line.get("allow_auto_create"):
+                raise ValueError(f"'{ref}' is not a known product. Check the spelling or receive it first.")
+            line = {**line, "item_type": {"CBU": "FG", "SKD": "SUB_ASSEMBLY", "CKD": "PART"}.get(s(line.get("inward_type")).upper(), "PART"),
+                    "serialized": "Y" if parse_serials(line.get("serials")) else "N"}
         return self.create_item({"item_name": line.get("item_name") or line.get("item"), "item_code": line.get("item_code"),
                                  "item_type": line.get("item_type"), "serialized": line.get("serialized"),
                                  "unit": line.get("unit"), "hsn_code": line.get("hsn_code"),
@@ -749,8 +752,9 @@ class Book:
         fg_code = s(fg_code)
         return [r for r in self.t[BOM].rows() if s(r["FG Item Code"]) == fg_code]
 
-    def set_bom(self, fg_ref, components: List[dict]) -> List[dict]:
-        fg = self.item(fg_ref)
+    def set_bom(self, fg_ref, components: List[dict], fg_serialized=None) -> List[dict]:
+        fg = self.find_item(fg_ref) or self.create_item({"item_name": fg_ref, "item_type": "FG",
+                                                         "serialized": "Y" if fg_serialized in (None, True, "Y") else "N"})
         if fg["Item Type"] not in ("FG", "SUB_ASSEMBLY"):
             raise ValueError("A BOM can only be defined for a finished good or sub-assembly.")
         seen = set()
@@ -758,7 +762,8 @@ class Book:
         for c in components:
             if not s(c.get("item")) and not s(c.get("item_code")):
                 continue
-            comp = self.item(c.get("item_code") or c.get("item"))
+            comp = self.find_item(c.get("item_code") or c.get("item")) or self.create_item(
+                {"item_name": c.get("item"), "item_type": "PART", "serialized": "N"})
             if comp["Item Code"] == fg["Item Code"]:
                 raise ValueError("An item cannot be a component of itself.")
             if comp["Item Code"] in seen:
@@ -991,17 +996,12 @@ class Book:
         inv_no = s(d.get("invoice_no"))
         if not supplier:
             raise ValueError("Supplier is required.")
-        if not inv_no:
-            raise ValueError("Supplier invoice number is required.")
-        for g in self.t[INWARDS].rows():
-            if g["Status"] != "Reversed" and norm(g["Supplier"]) == norm(supplier) and norm(g["Invoice No"]) == norm(inv_no):
-                raise ValueError(f"Invoice {inv_no} from {supplier} was already received on {g['GRN No']}.")
+        dup_grns = {g["GRN No"] for g in self.t[INWARDS].rows() if inv_no and g["Status"] != "Reversed"
+                    and norm(g["Supplier"]) == norm(supplier) and norm(g["Invoice No"]) == norm(inv_no)}
         grn_date = valid_date(d.get("grn_date") or today(), "GRN date")
         header_qc = s(d.get("qc_status") or "PENDING").upper()
         if header_qc not in ("PENDING", "PASSED"):
             raise ValueError("QC status at receipt must be PENDING or PASSED.")
-        if itype in ("CBU", "SKD", "CKD") and not s(d.get("bill_of_entry_no")):
-            self.warnings.append("Imported shipment saved without a Bill of Entry number - add it when available.")
         lines = [l for l in (d.get("lines") or []) if s(l.get("item")) or s(l.get("item_code")) or s(l.get("item_name"))]
         if not lines:
             raise ValueError("Add at least one item line.")
@@ -1013,7 +1013,10 @@ class Book:
         tot_acc = tot_short = tot_dmg = 0
         line_results = []
         for i, l in enumerate(lines, start=1):
-            item = self.get_or_create_item(l)
+            item = self.get_or_create_item({**l, "inward_type": itype, "allow_auto_create": True})
+            for ln in self.t[LINES].rows():
+                if ln["GRN No"] in dup_grns and ln["Item Code"] == item["Item Code"]:
+                    raise ValueError(f"{item['Item Name']} on invoice {inv_no} from {supplier} was already received on {ln['GRN No']}.")
             if itype == "CBU" and item["Item Type"] not in ("FG", "SPARE"):
                 self.warnings.append(f"CBU inward but '{item['Item Name']}' is a {item['Item Type']} - check the item type.")
             if itype in ("SKD", "CKD") and item["Item Type"] == "FG":
@@ -1037,6 +1040,8 @@ class Book:
             if qc not in ("PENDING", "PASSED"):
                 raise ValueError(f"Line {i}: QC status must be PENDING or PASSED.")
             zone = "QC_HOLD" if qc == "PENDING" else ("FG_STORE" if item["Item Type"] == "FG" else "RAW_STORE")
+            if item["Serialized"] != "Y" and parse_serials(l.get("serials")) and self.on_hand(item["Item Code"]) <= 0:
+                self.t[ITEMS].update(item["Item Code"], {"Serialized": "Y"})
             serials = self.check_new_serials(item, parse_serials(l.get("serials")), acc_q)
             dserials = parse_serials(l.get("damaged_serials"))
             if dmg_q > 0:
@@ -1084,8 +1089,6 @@ class Book:
         kits = num(d.get("kits_count"), 0)
         if kit_for and kits > 0:
             kit = self.kit_check(kit_for, kits, received_by_code)
-        elif itype in ("SKD", "CKD"):
-            self.warnings.append("No 'kit for' model / kit count entered, so kit completeness was not checked.")
         any_pending = any(r["zone"] == "QC_HOLD" for r in line_results)
         self.t[INWARDS].append({
             "GRN No": grn, "Inward Type": itype, "GRN Date": grn_date, "Warehouse": wh, "Supplier": supplier,
@@ -1198,8 +1201,6 @@ class Book:
         doc = s(d.get("doc_no"))
         if otype in ("SALE", "SAMPLE", "RTV") and not party:
             raise ValueError("Customer / party name is required.")
-        if otype in ("SALE", "RTV") and not doc:
-            raise ValueError("Invoice / delivery challan number is required.")
         ddate = valid_date(d.get("date") or today(), "Dispatch date")
         lines = [l for l in (d.get("lines") or []) if s(l.get("item")) or s(l.get("item_code"))]
         if not lines:
@@ -1228,7 +1229,7 @@ class Book:
                      message=cfg["label"])
             oldest = allocs[0]["batch"]["Date Received"] if allocs else ""
             msgs.append(f"{clean(qty)} {item['Unit']} {item['Item Name']} (oldest stock from {oldest})")
-        return {"message": f"{cfg['label']} {doc or ''} to {party or '-'}: " + "; ".join(msgs) + "."}
+        return {"message": f"{cfg['label']}{' ' + doc if doc else ''} to {party or '-'}: " + "; ".join(msgs) + "."}
 
     # ======================================================================
     # TRANSFER between warehouses / zones / bins
@@ -1420,7 +1421,7 @@ class Book:
                 if num(m["to_issue"]) > num(m["in_store"]) + 1e-9:
                     short.append(f"{m['item_name']} (need {m['to_issue']}, store has {m['in_store']})")
             if short and not d.get("allow_partial"):
-                raise ValueError("Store is short for: " + "; ".join(short[:12]) + ". Issue what is available line by line, or receive the shortage first.")
+                raise ValueError("Not enough parts in the Raw Store: " + "; ".join(short[:12]) + ".")
         if not lines:
             raise ValueError("Add at least one item to issue.")
         msgs = []
@@ -1541,6 +1542,23 @@ class Book:
         return {"message": f"{w['WO No']}: {clean(qty)} {fg['Item Name']} reported to {zone}"
                            + (f" (serials {fg_list[0]}…{fg_list[-1]})" if fg_list else "") +
                            f"; {len(need)} component(s) consumed from the line."}
+
+    def assemble(self, d: dict) -> dict:
+        """Simple one-step production: build N units from Raw Store parts per the BOM
+        (creates a work order, issues the parts, reports the output and closes it)."""
+        fg = self.item(d.get("fg_item"))
+        if not self.bom_for(fg["Item Code"]):
+            raise ValueError(f"{fg['Item Name']} has no BOM (list of parts per unit). Add it under Reports > Products & BOM first.")
+        wo = self.create_wo({"fg_item": fg["Item Code"], "planned_qty": d.get("qty"), "warehouse": d.get("warehouse"),
+                             "build_type": d.get("build_type") or "CKD", "production_line": d.get("production_line"),
+                             "remarks": d.get("remarks")})["wo_no"]
+        self.wo_issue({"wo_no": wo, "issue_per_bom": True})
+        self.wo_output({"wo_no": wo, "qty": d.get("qty"), "bin": d.get("bin"), "fg_serials": d.get("fg_serials"),
+                        "zone": d.get("zone") or "FG_STORE", "date": d.get("date"), "component_map": d.get("component_map")})
+        self.wo_close({"wo_no": wo})
+        n = clean(num(d.get("qty")))
+        return {"wo_no": wo, "message": f"Assembled {n} {fg['Item Name']} at {self.wo(wo)['Warehouse']} ({wo}); "
+                                        f"parts taken from the Raw Store per the BOM, oldest stock first."}
 
     def wo_return(self, d: dict) -> dict:
         w = self.wo(d.get("wo_no"))
@@ -1772,7 +1790,7 @@ are assembled on production lines under work orders, and dispatched).
 Return ONLY one JSON object, one of:
 
 1) A stock action:
-{{"type":"action","action":"DISPATCH"|"TRANSFER"|"ADJUST"|"ISSUE",
+{{"type":"action","action":"RECEIVE"|"DISPATCH"|"TRANSFER"|"ADJUST"|"ISSUE",
   "item":"<item name or code>", "qty":<number>, "serials":["..."],
   "warehouse":"<warehouse>",            // DISPATCH, ADJUST
   "party":"<customer>", "doc_no":"<invoice/challan no>",   // DISPATCH
@@ -1792,8 +1810,9 @@ Return ONLY one JSON object, one of:
 RULES
 - Today is {today}. Warehouses allowed: {warehouses}. Normalise warehouse names to exactly one of these.
 - Known items (reuse exact spelling): {items}
-- New goods coming in (inward / GRN) are NOT handled in chat: return {{"type":"unknown","reason":"Please use the Inward (GRN) page to receive goods - it captures invoice, BoE, QC and serials."}}
-- Production output is NOT handled in chat: return unknown with reason "Please use the Production page to report output."
+- Goods arriving -> action "RECEIVE" with extra fields "inward_type":"CBU"|"SKD"|"CKD"|"LOCAL" (only if stated or obvious),
+  "storage_location":"<rack/shelf/bin>", "supplier":"..", "invoice_no":"..".
+- Assembling / producing finished units is NOT handled in chat: return unknown with reason "Please use Log Stock > Assemble on the dashboard."
 - "sold", "dispatched", "shipped" -> DISPATCH. "moved", "shifted", "transferred" -> TRANSFER.
   "damaged", "lost", "found extra", "count correction" -> ADJUST. "issue to WO / line" -> ISSUE.
 - "where is serial X", "trace X", "history of X" -> SERIAL_TRACE. "how many can we build/assemble" -> BUILDABLE.
@@ -1921,7 +1940,7 @@ def get_bom(fg: str = ""):
 @app.post("/api/bom")
 def save_bom(d: dict):
     def fn(b: Book):
-        rows = b.set_bom(d.get("fg_item"), d.get("components") or [])
+        rows = b.set_bom(d.get("fg_item"), d.get("components") or [], d.get("fg_serialized"))
         return {"message": f"BOM saved with {len(rows)} component(s).", "lines": rows}
     return run_master(_user(d), fn, f"BOM for {s(d.get('fg_item'))}")
 
@@ -1991,10 +2010,11 @@ def undo(d: dict = None):
         try:
             res = book.undo_last(_user(d))
         except ValueError as e:
-            return {"success": False, "message": str(e)}
+            raise HTTPException(400, str(e))
         try:
             STORE.save(book.to_bytes(), sha, f"Undo {res['txn_id']} by {_user(d)}")
             _read_cache.update(sha=None, book=None)
+            res = {**res, "action": ACTION_LABEL.get(res["type"], res["type"]), "product": res["item"]}
             return {"success": True, "reversed": res,
                     "message": f"Reversed {res['txn_id']} ({res['type']}{' - ' + res['item'] if res['item'] else ''})."}
         except Conflict:
@@ -2088,15 +2108,23 @@ def buildable():
 @app.get("/api/aging-report")
 def aging_report(threshold_days: Optional[int] = None):
     t = threshold_days or AGING_THRESHOLD_DAYS
-    return {"threshold_days": t, "batches": read_book().aging(t)}
+    rows = [{**r, "Product": r["Item Name"], "Location": f"{r['Warehouse']} · {ZONE_SHORT.get(r['Zone'], r['Zone'])}",
+             "Storage Location": r["Bin"]} for r in read_book().aging(t)]
+    return {"threshold_days": t, "batches": rows}
 
 
 @app.get("/api/transactions")
 def transactions(limit: int = 100, type: str = "", item: str = ""):
     b = read_book()
-    rows = [r for r in b.t[LOG].rows() if (not type or r["Txn Type"] == type)
+    hidden = set() if type else {"WO_CREATE", "WO_ISSUE", "WO_CLOSE"}
+    rows = [r for r in b.t[LOG].rows() if r["Txn Type"] not in hidden and (not type or r["Txn Type"] == type)
             and (not item or norm(item) in norm(r["Item Name"]) or norm(item) == norm(r["Item Code"]))]
-    return {"transactions": rows[::-1][:limit]}
+    def loc(wh, z):
+        return " · ".join(x for x in (s(wh), ZONE_SHORT.get(s(z), s(z))) if x)
+    out = [{**r, "Action": ACTION_LABEL.get(r["Txn Type"], r["Txn Type"]), "Product": r["Item Name"],
+            "From Location": loc(r["From Warehouse"], r["From Zone"]), "To Location": loc(r["To Warehouse"], r["To Zone"]),
+            "Quantity": r["Qty"] if r["Qty"] != "" else None} for r in rows[::-1][:limit]]
+    return {"transactions": out}
 
 
 @app.get("/api/dashboard")
@@ -2167,6 +2195,15 @@ def handle_chat(b: Book, p: dict, msg: str, user: str) -> dict:
     if kind == "action":
         a = s(p.get("action")).upper()
         sers = p.get("serials") or []
+        if a == "RECEIVE":
+            it = s(p.get("inward_type")).upper()
+            if it not in INWARD_TYPES:
+                return {"success": False, "message": "Is this a CBU, SKD, CKD or local inward? Please say which (e.g. 'received 20 CKD kits of …')."}
+            body = {"inward_type": it, "warehouse": p.get("warehouse"), "supplier": p.get("supplier") or "Not specified",
+                    "invoice_no": p.get("invoice_no"), "qc_status": "PASSED",
+                    "lines": [{"item": p.get("item"), "invoice_qty": p.get("qty"), "bin": p.get("storage_location") or p.get("bin"),
+                               "serials": sers}]}
+            return run_txn("INWARD", user, lambda bk: bk.inward(body), f"Chat inward: {msg[:60]}")
         if a == "DISPATCH":
             body = {"outward_type": "SALE", "warehouse": p.get("warehouse"), "party": p.get("party"), "doc_no": p.get("doc_no"),
                     "lines": [{"item": p.get("item"), "qty": p.get("qty"), "serials": sers, "zone": p.get("zone")}]}
@@ -2292,7 +2329,174 @@ async def scan_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(502, f"Could not read the document: {e}")
     parsed["_filename"] = file.filename
-    return {"success": True, "document": parsed}
+    direction = s(parsed.get("direction") or "UNKNOWN").upper()
+    action = {"INWARD": "RECEIVE", "OUTWARD": "DISPATCH"}.get(direction, "UNKNOWN")
+    known = {norm(n): n for n in names}
+    drafts = []
+    for it in parsed.get("items") or []:
+        nm = s(it.get("item_name")) or s(it.get("item_code"))
+        drafts.append({"action": action, "product": known.get(norm(nm), nm),
+                       "serial_number": ", ".join(s(x) for x in (it.get("serials") or [])),
+                       "quantity": it.get("qty") or 0, "unit": it.get("unit") or "pcs", "unit_price": it.get("unit_price") or "",
+                       "location": WAREHOUSES[0], "storage_location": "", "to_location": "",
+                       "reference_no": parsed.get("invoice_no") or ""})
+    parsed.update({"document_number": parsed.get("invoice_no"), "document_date": parsed.get("invoice_date"),
+                   "party_name": parsed.get("supplier") if action != "DISPATCH" else (parsed.get("customer") or parsed.get("supplier"))})
+    return {"success": True, "document": parsed, "action": action, "drafts": drafts,
+            "needs_review": action == "UNKNOWN" or not drafts}
+
+
+# ============================================================================
+# SIMPLE UI ENDPOINTS (the dashboard "Log Stock" form, scan review, reports)
+# ============================================================================
+ZONE_SHORT = {"QC_HOLD": "QC Hold", "RAW_STORE": "Raw Store", "WIP": "Production", "FG_STORE": "FG Store", "QUARANTINE": "Quarantine"}
+ACTION_LABEL = {"INWARD": "STOCK IN", "INWARD_DAMAGED": "STOCK IN (damaged)", "QC_PASS": "QC PASSED", "QC_REJECT": "QC REJECTED",
+                "WO_CREATE": "WORK ORDER", "WO_ISSUE": "ISSUED TO LINE", "WO_CONSUME": "USED IN ASSEMBLY", "WO_OUTPUT": "ASSEMBLED",
+                "WO_RETURN": "RETURNED FROM LINE", "WO_CLOSE": "WORK ORDER CLOSED", "DISPATCH": "STOCK OUT", "SAMPLE": "SAMPLE OUT",
+                "RTV": "RETURN TO VENDOR", "SCRAP": "SCRAP", "TRANSFER": "TRANSFER", "ADJUST_IN": "ADJUST +", "ADJUST_OUT": "ADJUST -",
+                "SALES_RETURN": "CUSTOMER RETURN", "UNDO": "UNDO"}
+
+
+def _with_warnings(r: dict) -> dict:
+    if r.get("success") and r.get("warnings"):
+        r["message"] = (r.get("message") or "") + "  Note: " + " ".join(r["warnings"])
+    return r
+
+
+def _simple_body(d: dict) -> tuple:
+    a = s(d.get("action")).upper()
+    if a == "RECEIVE":
+        return "INWARD", lambda b: b.inward({
+            "inward_type": s(d.get("inward_type")) or "LOCAL", "warehouse": d.get("location"), "supplier": d.get("supplier"),
+            "invoice_no": d.get("reference_no"), "grn_date": d.get("date_received"), "qc_status": d.get("qc_status") or "PASSED",
+            "bill_of_entry_no": d.get("bill_of_entry_no"), "boe_date": d.get("boe_date"), "bl_awb_no": d.get("bl_awb_no"),
+            "container_no": d.get("container_no"), "country_of_origin": d.get("country_of_origin"), "po_no": d.get("po_no"),
+            "currency": d.get("currency"), "kit_for_item": d.get("kit_for_item"), "kits_count": d.get("kits_count"),
+            "remarks": d.get("delivery_address"), "source_document": d.get("source_document"),
+            "lines": [{"item": d.get("product"), "invoice_qty": d.get("invoice_qty") or d.get("quantity"),
+                       "received_qty": d.get("quantity"), "damaged_qty": d.get("damaged_qty"), "bin": d.get("storage_location"),
+                       "serials": d.get("serial_number"), "damaged_serials": d.get("damaged_serials"),
+                       "unit_price": d.get("unit_price"), "unit": d.get("unit"), "item_type": d.get("item_type")}]})
+    if a == "DISPATCH":
+        return "DISPATCH", lambda b: b.dispatch({
+            "outward_type": d.get("outward_type") or "SALE", "warehouse": d.get("location"), "party": d.get("party"),
+            "doc_no": d.get("reference_no"), "date": d.get("date_received"), "address": d.get("delivery_address"),
+            "lines": [{"item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number")}]})
+    if a == "TRANSFER":
+        return "TRANSFER", lambda b: b.transfer({
+            "item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number"),
+            "from_warehouse": d.get("from_location"), "to_warehouse": d.get("to_location"), "to_bin": d.get("storage_location"),
+            "doc_no": d.get("reference_no")})
+    if a == "ADJUST":
+        return "ADJUST", lambda b: b.adjust({
+            "item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number"), "warehouse": d.get("location"),
+            "bin": d.get("storage_location"), "reason": d.get("reason")})
+    if a == "PRODUCE":
+        return "WO_OUTPUT", lambda b: b.assemble({
+            "fg_item": d.get("product"), "qty": d.get("quantity"), "warehouse": d.get("location"), "bin": d.get("storage_location"),
+            "fg_serials": d.get("serial_number"), "build_type": d.get("build_type"), "date": d.get("date_received"),
+            "production_line": d.get("production_line")})
+    raise HTTPException(400, f"Unknown action '{a}'.")
+
+
+@app.post("/api/log")
+def simple_log(d: dict):
+    kind, fn = _simple_body(d)
+    return _with_warnings(run_txn(kind, _user(d), fn, f"{s(d.get('action')).title()}: {s(d.get('product'))}"))
+
+
+@app.post("/api/log-document")
+def log_document(d: dict):
+    """Commit a reviewed scanned bill. RECEIVE lines become one GRN per warehouse; DISPATCH lines one outward."""
+    items = d.get("items") or []
+    if any(s(i.get("action")).upper() not in ("RECEIVE", "DISPATCH", "TRANSFER") for i in items):
+        return {"success": False, "message": "Direction is still unknown. Choose RECEIVE or DISPATCH for every line."}
+
+    def fn(b: Book):
+        msgs = []
+        groups: Dict[tuple, list] = {}
+        for i in items:
+            groups.setdefault((s(i.get("action")).upper(), s(i.get("location"))), []).append(i)
+        for (act, wh), lines in groups.items():
+            if act == "RECEIVE":
+                r = b.inward({"inward_type": d.get("inward_type") or "LOCAL", "warehouse": wh, "supplier": d.get("party_name"),
+                              "invoice_no": d.get("document_number"), "invoice_date": d.get("document_date"),
+                              "grn_date": today(), "qc_status": d.get("qc_status") or "PASSED",
+                              "bill_of_entry_no": d.get("bill_of_entry_no"), "bl_awb_no": d.get("bl_awb_no"),
+                              "container_no": d.get("container_no"), "country_of_origin": d.get("country_of_origin"),
+                              "currency": d.get("currency"), "source_document": d.get("source_document"),
+                              "lines": [{"item": l.get("product"), "invoice_qty": l.get("quantity"), "bin": l.get("storage_location"),
+                                         "serials": l.get("serial_number"), "unit": l.get("unit"), "unit_price": l.get("unit_price")}
+                                        for l in lines]})
+                msgs.append(r["message"])
+            elif act == "DISPATCH":
+                r = b.dispatch({"outward_type": "SALE", "warehouse": wh, "party": d.get("party_name"),
+                                "doc_no": d.get("document_number"), "address": d.get("delivery_address"),
+                                "lines": [{"item": l.get("product"), "qty": l.get("quantity"), "serials": l.get("serial_number")}
+                                          for l in lines]})
+                msgs.append(r["message"])
+            else:
+                for l in lines:
+                    msgs.append(b.transfer({"item": l.get("product"), "qty": l.get("quantity"), "serials": l.get("serial_number"),
+                                            "from_warehouse": wh, "to_warehouse": l.get("to_location"),
+                                            "to_bin": l.get("storage_location"), "doc_no": d.get("document_number")})["message"])
+        return {"message": " ".join(msgs)}
+    return _with_warnings(run_txn("INWARD", _user(d), fn, f"Scanned {s(d.get('document_number'))}"))
+
+
+@app.get("/api/products")
+def products_simple():
+    b = read_book()
+    sers: Dict[str, list] = {}
+    for r in b.t[SERIALS].rows():
+        if r["Status"] == "In Stock":
+            sers.setdefault(r["Item Code"], []).append({"serial_number": r["Serial No"], "location": r["Warehouse"],
+                                                       "zone": ZONE_SHORT.get(r["Zone"], r["Zone"]), "bin": r["Bin"]})
+    out = []
+    for e in b.stock_summary():
+        locs: Dict[str, float] = {}
+        bins: Dict[str, set] = {}
+        for l in e["locations"]:
+            wh, z, bn = (l["location"].split(" / ", 2) + ["", ""])[:3]
+            key = f"{wh} · {ZONE_SHORT.get(z, z)}"
+            locs[key] = locs.get(key, 0) + num(l["quantity"])
+            bins.setdefault(key, set()).add(bn)
+        out.append({"product": e["item_name"], "item_code": e["item_code"], "item_type": e["item_type"], "unit": e["unit"],
+                    "total": e["total"], "available": e["available"],
+                    "locations": [{"location": k, "quantity": clean(round(v, 4)), "bins": ", ".join(sorted(x for x in bins[k] if x and x != "-"))}
+                                  for k, v in sorted(locs.items())],
+                    "serial_numbers": sers.get(e["item_code"], [])})
+    return {"products": out}
+
+
+@app.get("/api/product-master")
+def product_master():
+    b = read_book()
+    return {"products": [{"id": i["Item Code"], "name": i["Item Name"], "status": i["Status"], "type": i["Item Type"],
+                          "serialized": i["Serialized"]} for i in b.t[ITEMS].rows()]}
+
+
+@app.get("/api/dashboard-summary")
+def dashboard_summary():
+    b = read_book()
+    stock = b.stock_summary()
+    active = [x for x in b.t[BATCHES].rows() if num(x["Qty Remaining"]) > 0]
+    return {"summary": {
+        "total_products": len(stock),
+        "total_locations": len({x["Warehouse"] for x in active}),
+        "total_quantity": clean(round(sum(num(x["Qty Remaining"]) for x in active), 4)),
+        "active_batches": len(active),
+        "aging_alerts": len(b.aging()),
+        "aging_threshold_days": AGING_THRESHOLD_DAYS,
+        "pending_qc": len([x for x in active if x["Zone"] == "QC_HOLD"]),
+        "fg_ready": clean(round(sum(num(x["Qty Remaining"]) for x in active if x["Zone"] == "FG_STORE"), 4)),
+    }}
+
+
+@app.get("/api/download-url")
+def download_url_route():
+    return {"url": STORE.download_url()}
+
 
 
 # Local development only: serve the HTML pages from the same server when LOCAL_XLSX is set.
