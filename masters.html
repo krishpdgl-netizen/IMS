@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Items & BOM | Panache Factory Inventory</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="main" id="root">
+    <div id="pageHeader"></div>
+    <div class="tabs">
+        <button data-tab="items">Item master</button>
+        <button data-tab="bom">Bill of materials (BOM)</button>
+    </div>
+
+    <div class="tab-panel" id="items">
+        <div class="section">
+            <div class="section-header">
+                <div><h2>Items</h2><p class="section-help">Every finished model, sub-assembly and part. "Serialized" items are tracked unit by unit.</p></div>
+                <div class="btn-row">
+                    <input id="itemSearch" placeholder="Search…" style="max-width:200px" oninput="renderItems()">
+                    <select id="typeFilter" style="max-width:170px" onchange="renderItems()"></select>
+                    <button class="btn secondary" onclick="bulkModal()">Paste many</button>
+                    <button class="btn" onclick="itemModal()">＋ New item</button>
+                </div>
+            </div>
+            <div id="itemTable"></div>
+        </div>
+    </div>
+
+    <div class="tab-panel" id="bom" hidden>
+        <div class="grid-2">
+            <div class="section">
+                <div class="section-header"><div><h2>Edit BOM</h2><p class="section-help">Components and quantity needed to build <b>one</b> unit. Used for kit checks on SKD/CKD inward, issuing to work orders and consumption.</p></div></div>
+                <div class="form-grid cols-2">
+                    <label class="req">Finished model / sub-assembly<input id="bomFg" list="fgList" onchange="loadBom()"></label>
+                    <label>&nbsp;<button class="btn secondary" type="button" onclick="pasteBom()">Paste component list</button></label>
+                </div>
+                <div class="form-title">Components</div>
+                <div id="bomRows"></div>
+                <button type="button" class="btn small secondary" onclick="bomRow()">＋ Add component</button>
+                <div id="bomRes" class="result"></div>
+                <div class="btn-row" style="margin-top:12px"><button class="btn" id="bomBtn" onclick="saveBom()">Save BOM</button></div>
+            </div>
+            <div class="section">
+                <div class="section-header"><h2>Models with a BOM</h2></div>
+                <div id="bomList"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<datalist id="fgList"></datalist>
+
+<script src="app.js"></script>
+<script>
+initPage("Items & BOM", "Item master and bills of materials.");
+let BOMS = [];
+
+async function setup() {
+    const m = await loadMeta();
+    document.getElementById("typeFilter").innerHTML = options(m.item_types, "", "All types");
+}
+function renderItems() {
+    const q = document.getElementById("itemSearch").value.toLowerCase(), t = document.getElementById("typeFilter").value;
+    const rows = ITEMS.filter(i => (!t || i["Item Type"] === t) && (!q || [i["Item Code"], i["Item Name"], i.Model, i.Category, i["HSN Code"]].some(x => String(x || "").toLowerCase().includes(q))));
+    document.getElementById("itemTable").innerHTML = table(["Code", "Name", "Type", "Serialized", "Unit", "HSN", "Warranty", "On hand", "Available", "BOM", "Status", ""],
+        rows.map(i => [`<b class="mono">${esc(i["Item Code"])}</b>`, esc(i["Item Name"]) + (i.Model ? `<br><span class="small muted">${esc(i.Model)} ${esc(i.Variant)}</span>` : ""),
+            `<span class="type-tag">${esc(i["Item Type"])}</span>`, i.Serialized === "Y" ? "Yes" : "No", esc(i.Unit), esc(i["HSN Code"]),
+            i["Warranty Months"] ? i["Warranty Months"] + " mo" : "", fmtQty(i.on_hand), fmtQty(i.available), i.has_bom ? "✓" : "",
+            i.Status === "Active" ? "" : statusPill(i.Status), `<button class="link-btn" onclick="itemModal(ITEMS[${ITEMS.indexOf(i)}]['Item Code'])">Edit</button>`]),
+        "No items yet. Add your models and parts, or paste a list.");
+}
+function itemModal(code) {
+    const i = code ? ITEMS.find(x => x["Item Code"] === code) : {};
+    const v = k => esc(i[k] ?? "");
+    openModal(code ? `Edit ${code}` : "New item", `
+      <form id="itemForm" class="form-grid cols-2" onsubmit="event.preventDefault(); saveItem(this.dataset.code)" data-code="${esc(code || "")}">
+        <label class="req">Item name<input name="item_name" value="${v("Item Name")}"></label>
+        <label>Item code / part no. ${code ? "" : '<span class="hint">blank = auto</span>'}<input name="item_code" value="${v("Item Code")}" ${code ? "disabled" : ""}></label>
+        <label class="req">Item type<select name="item_type">${options(META.item_types, i["Item Type"] || "", "Choose…")}</select></label>
+        <label class="req">Serialized?<select name="serialized">${options({ N: "No - count only", Y: "Yes - one serial per unit" }, i.Serialized || "N")}</select></label>
+        <label>Model<input name="model" value="${v("Model")}"></label>
+        <label>Variant / revision<input name="variant" value="${v("Variant")}"></label>
+        <label>Category<input name="category" value="${v("Category")}" placeholder="TV, Mini PC, Monitor…"></label>
+        <label>Unit<input name="unit" value="${v("Unit")}" placeholder="pcs / units / sets"></label>
+        <label>HSN code<input name="hsn_code" value="${v("HSN Code")}"></label>
+        <label>Warranty (months)<input name="warranty_months" type="number" min="0" value="${v("Warranty Months")}"></label>
+        <label>Reorder level<input name="reorder_level" type="number" min="0" value="${v("Reorder Level")}"></label>
+        ${code ? `<label>Status<select name="status">${options(["Active", "Inactive"], i.Status)}</select></label>` : ""}
+        <label class="full">Remarks<input name="remarks" value="${v("Remarks")}"></label>
+        <div class="full"><div id="iRes" class="result"></div>
+        <div class="modal-actions"><button type="button" class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="iBtn">Save</button></div></div>
+      </form>`);
+}
+async function saveItem(code) {
+    const body = formData(document.getElementById("itemForm"));
+    if (code) body.existing_code = code;
+    const r = await submitWith(document.getElementById("iBtn"), () => apiPost("/api/items", body));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("iRes"), r);
+    closeModal(); showToast(r.message); refresh();
+}
+function bulkModal() {
+    openModal("Paste many items", `
+      <p class="notice">One item per line, columns separated by commas or tabs (you can copy straight from Excel):<br>
+      <span class="mono">item code, item name, type, serialized (Y/N), unit, HSN, warranty months</span><br>
+      Types: ${Object.keys(META.item_types).join(", ")}. Items whose name already exists are skipped.</p>
+      <textarea id="bulkText" rows="10" placeholder="MB-43-V2, Main Board 43in V2, PART, Y, pcs, 85299090, 0"></textarea>
+      <div id="bRes" class="result"></div>
+      <div class="modal-actions"><button class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="bBtn" onclick="saveBulk()">Add items</button></div>`, true);
+}
+async function saveBulk() {
+    const rows = document.getElementById("bulkText").value.split(/\n/).map(l => l.split(/\t|,/).map(x => x.trim())).filter(c => c.length >= 2 && c[1])
+        .filter(c => !/^item ?code$/i.test(c[0]))
+        .map(c => ({ item_code: c[0], item_name: c[1], item_type: (c[2] || "PART").toUpperCase(), serialized: c[3] || "N", unit: c[4] || "", hsn_code: c[5] || "", warranty_months: c[6] || "" }));
+    if (!rows.length) return showToast("Nothing to add.", "error");
+    const r = await submitWith(document.getElementById("bBtn"), () => apiPost("/api/items/bulk", { rows }));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("bRes"), r);
+    closeModal(); showToast(r.message); refresh();
+}
+
+/* ---------- BOM ---------- */
+function bomRow(item, qty, remarks) {
+    document.getElementById("bomRows").insertAdjacentHTML("beforeend", `<div class="simple-row" data-row style="grid-template-columns:2.5fr 1fr 2fr auto">
+        <input data-k="item" list="itemList" placeholder="Component" value="${esc(item || "")}">
+        <input data-k="qty_per_unit" type="number" min="0" step="any" placeholder="Qty / unit" value="${esc(qty ?? "")}">
+        <input data-k="remarks" placeholder="Remarks" value="${esc(remarks || "")}">
+        <button type="button" class="link-btn" onclick="this.parentElement.remove()" aria-label="Remove">✕</button></div>`);
+}
+async function loadBom() {
+    const fg = document.getElementById("bomFg").value.trim();
+    document.getElementById("bomRows").innerHTML = "";
+    document.getElementById("bomRes").style.display = "none";
+    if (!fg) return;
+    const r = await apiGet("/api/bom?fg=" + encodeURIComponent(fg));
+    (r.lines || []).forEach(l => bomRow(l["Component Name"], l["Qty Per Unit"], l.Remarks));
+    if (!(r.lines || []).length) { bomRow(); bomRow(); bomRow(); }
+}
+function editBom(i) { document.getElementById("bomFg").value = BOMS[i].fg_item_name; loadBom(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+function pasteBom() {
+    openModal("Paste component list", `<p class="notice">One component per line: <span class="mono">component code or name, qty per unit</span>. Copy two columns from Excel.</p>
+      <textarea id="bomText" rows="10"></textarea>
+      <div class="modal-actions"><button class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" onclick="applyPaste()">Use these</button></div>`);
+}
+function applyPaste() {
+    const lines = document.getElementById("bomText").value.split(/\n/).map(l => l.split(/\t|,/).map(x => x.trim())).filter(c => c[0]);
+    document.getElementById("bomRows").innerHTML = "";
+    lines.forEach(c => { const it = findItem(c[0]); bomRow(it ? it["Item Name"] : c[0], c[1] || 1); });
+    closeModal();
+    const unknown = lines.filter(c => !findItem(c[0])).map(c => c[0]);
+    if (unknown.length) showToast("Not in Item Master yet: " + unknown.slice(0, 6).join(", ") + ". Add them first.", "error");
+}
+async function saveBom() {
+    const fg = document.getElementById("bomFg").value.trim();
+    const components = rowsData(document.getElementById("bomRows")).filter(r => r.item);
+    const r = await submitWith(document.getElementById("bomBtn"), () => apiPost("/api/bom", { fg_item: fg, components }));
+    if (!r) return;
+    showResult(document.getElementById("bomRes"), r);
+    if (r.success) refresh();
+}
+function renderBoms() {
+    document.getElementById("bomList").innerHTML = table(["Model", "Components", ""], BOMS.map(b => [
+        `<b>${esc(b.fg_item_name)}</b><br><span class="small muted">${esc(b.fg_item_code)}</span>`,
+        `<span class="small">${b.lines.map(l => `${esc(l["Component Name"])} × ${l["Qty Per Unit"]}`).join("<br>")}</span>`,
+        `<button class="link-btn" onclick="editBom(${BOMS.indexOf(b)})">Edit</button>`]), "No BOMs yet.");
+}
+
+async function refresh() {
+    await loadItems(true);
+    BOMS = (await apiGet("/api/bom")).boms || [];
+    document.getElementById("fgList").innerHTML = ITEMS.filter(i => ["FG", "SUB_ASSEMBLY"].includes(i["Item Type"]))
+        .map(i => `<option value="${esc(i["Item Name"])}">${esc(i["Item Code"])}</option>`).join("");
+    renderItems(); renderBoms();
+}
+window.refresh = refresh;
+setup().then(() => { initTabs(document.getElementById("root")); return refresh(); }).catch(e => showToast(e.message, "error"));
+</script>
+</body>
+</html>

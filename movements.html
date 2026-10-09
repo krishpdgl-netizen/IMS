@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dispatch & Moves | Panache Factory Inventory</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="main" id="root">
+    <div id="pageHeader"></div>
+    <div class="tabs">
+        <button data-tab="dispatch">Dispatch / outward</button>
+        <button data-tab="transfer">Transfer</button>
+        <button data-tab="adjust">Adjustment</button>
+        <button data-tab="return">Customer return</button>
+    </div>
+
+    <!-- DISPATCH -->
+    <div class="tab-panel section" id="dispatch">
+      <form id="dForm" autocomplete="off" onsubmit="event.preventDefault(); doDispatch()">
+        <div class="form-title">What kind of outward?</div>
+        <div class="type-choice" id="outTypes"></div>
+        <div class="form-title">Document</div>
+        <div class="form-grid">
+            <label class="req">From warehouse<select name="warehouse" class="whSel"></select></label>
+            <label class="wide req">Customer / party<input name="party" placeholder="Customer, vendor or 'Scrap'"></label>
+            <label class="req">Invoice / challan no.<input name="doc_no"></label>
+            <label>Date<input type="date" name="date"></label>
+            <label class="wide">Delivery address / remarks<input name="address"></label>
+        </div>
+        <div class="form-title">Items <span class="hint">- serialised items must list the exact serials leaving; others go oldest batch first (FIFO)</span></div>
+        <div id="dRows"></div>
+        <button type="button" class="btn small secondary" onclick="addRow('dRows', true)">＋ Add item</button>
+        <div id="dRes" class="result"></div>
+        <div class="btn-row sticky-actions"><button class="btn" id="dBtn">Save outward</button></div>
+      </form>
+    </div>
+
+    <!-- TRANSFER -->
+    <div class="tab-panel section" id="transfer" hidden>
+      <p class="section-help" style="margin-top:0">Move stock between warehouses, between zones (e.g. store → quarantine) or just to another bin. Receipt dates are kept, so aging stays correct.</p>
+      <form id="tForm" class="form-grid" autocomplete="off" onsubmit="event.preventDefault(); doTransfer()">
+        <label class="wide req">Item<input name="item" list="itemList" onchange="showAvail(this)"><span class="avail hint"></span></label>
+        <label class="req">Quantity<input name="qty" type="number" min="0" step="any"></label>
+        <label>Transfer challan no.<input name="doc_no"></label>
+        <label class="req">From warehouse<select name="from_warehouse" class="whSel"></select></label>
+        <label>From zone<select name="from_zone" class="zoneSel"></select></label>
+        <label class="req">To warehouse<select name="to_warehouse" class="whSel"></select></label>
+        <label>To zone<select name="to_zone" class="zoneSel"><option value="">Same as from</option></select></label>
+        <label class="req">To bin / rack<input name="to_bin"></label>
+        <label>Vehicle / remarks<input name="remarks"></label>
+        <label class="full">Serial numbers <span class="hint">required for serialised items</span><textarea name="serials" data-serials rows="3"></textarea><span class="serial-count"></span></label>
+        <div class="full"><div id="tRes" class="result"></div><div class="btn-row" style="margin-top:8px"><button class="btn" id="tBtn">Save transfer</button></div></div>
+      </form>
+    </div>
+
+    <!-- ADJUST -->
+    <div class="tab-panel section" id="adjust" hidden>
+      <p class="section-help" style="margin-top:0">Stock-count corrections. Use a <b>minus</b> quantity for lost / damaged / short, <b>plus</b> for found stock.</p>
+      <form id="aForm" class="form-grid" autocomplete="off" onsubmit="event.preventDefault(); doAdjust()">
+        <label class="wide req">Item<input name="item" list="itemList" onchange="showAvail(this)"><span class="avail hint"></span></label>
+        <label class="req">Quantity (+/−)<input name="qty" type="number" step="any" placeholder="-2 or 5"></label>
+        <label class="req">Warehouse<select name="warehouse" class="whSel"></select></label>
+        <label>Zone<select name="zone" class="zoneSel"></select></label>
+        <label>Bin <span class="hint">needed when adding</span><input name="bin"></label>
+        <label class="wide req">Reason<input name="reason" placeholder="Cycle count 12-Oct, water damage, found in R-A4…"></label>
+        <label class="full">Serial numbers <span class="hint">serialised items: the units removed, or the new units found</span><textarea name="serials" data-serials rows="3"></textarea><span class="serial-count"></span></label>
+        <div class="full"><div id="aRes" class="result"></div><div class="btn-row" style="margin-top:8px"><button class="btn" id="aBtn">Save adjustment</button></div></div>
+      </form>
+    </div>
+
+    <!-- CUSTOMER RETURN -->
+    <div class="tab-panel section" id="return" hidden>
+      <p class="section-help" style="margin-top:0">Units sent back by a customer. They land in Quarantine (or QC Hold) until inspected; serialised units must have been dispatched before.</p>
+      <form id="rForm" autocomplete="off" onsubmit="event.preventDefault(); doReturn()">
+        <div class="form-grid">
+            <label class="req">Into warehouse<select name="warehouse" class="whSel"></select></label>
+            <label class="wide req">Customer<input name="party"></label>
+            <label class="req">Credit note / RMA no.<input name="doc_no"></label>
+            <label>Put in<select name="zone"><option value="QUARANTINE">Quarantine</option><option value="QC_HOLD">QC Hold (inspect)</option></select></label>
+            <label>Bin<input name="bin"></label>
+            <label>Date<input type="date" name="date"></label>
+            <label>Remarks<input name="remarks"></label>
+        </div>
+        <div class="form-title">Items returned</div>
+        <div id="rRows"></div>
+        <button type="button" class="btn small secondary" onclick="addRow('rRows', false)">＋ Add item</button>
+        <div id="rRes" class="result"></div>
+        <div class="btn-row sticky-actions"><button class="btn" id="rBtn">Save return</button></div>
+      </form>
+    </div>
+</div>
+
+<script src="app.js"></script>
+<script>
+initPage("Dispatch & Moves", "Everything that leaves or moves inside the factory.");
+
+async function setup() {
+    const m = await loadMeta();
+    document.querySelectorAll(".whSel").forEach(s => s.innerHTML = options(m.warehouses, m.warehouses[0]));
+    document.querySelectorAll(".zoneSel").forEach(s => s.insertAdjacentHTML("beforeend",
+        options({ FG_STORE: "Finished Goods Store", RAW_STORE: "Raw / Parts Store", QUARANTINE: "Quarantine" }, "")));
+    document.querySelector("#aForm [name=zone]").insertAdjacentHTML("beforeend", '<option value="QC_HOLD">QC Hold</option>');
+    ["#tForm [name=from_zone]", "#aForm [name=zone]"].forEach(sel => {
+        const s = document.querySelector(sel);
+        s.insertAdjacentHTML("afterbegin", '<option value="">Auto: FG Store for finished goods, else Raw Store</option>');
+        s.value = "";
+    });
+    const help = { SALE: "Sale invoice / delivery challan to a customer", SAMPLE: "Demo or sample unit going out",
+        RTV: "Defective or excess goods back to the supplier", SCRAP: "Written off and disposed" };
+    document.getElementById("outTypes").innerHTML = Object.keys(m.outward_types).map((t, i) =>
+        `<label><input type="radio" name="outward_type" value="${t}" ${i === 0 ? "checked" : ""}><span><b>${esc(m.outward_types[t].split(" /")[0].split(" (")[0])}</b><small>${esc(help[t] || "")}</small></span></label>`).join("");
+    document.querySelectorAll("input[type=date]").forEach(d => d.value = today());
+    await loadItems();
+    addRow("dRows", true); addRow("rRows", false);
+}
+
+function addRow(id, withZone) {
+    document.getElementById(id).insertAdjacentHTML("beforeend", `<div class="simple-row" data-row>
+        <div><input data-k="item" list="itemList" placeholder="Item" onchange="showAvail(this)"><span class="avail hint"></span></div>
+        <input data-k="qty" type="number" min="0" step="any" placeholder="Qty">
+        ${withZone ? `<select data-k="zone"><option value="">Any allowed zone</option><option value="FG_STORE">Finished Goods</option><option value="RAW_STORE">Raw Store</option><option value="QUARANTINE">Quarantine</option></select>` : "<span></span>"}
+        <div><textarea data-k="serials" data-serials rows="1" placeholder="Serials (serialised items)"></textarea><span class="serial-count"></span></div>
+        <button type="button" class="link-btn" onclick="this.parentElement.remove()" aria-label="Remove">✕</button></div>`);
+}
+async function showAvail(input) {
+    const out = input.parentElement.querySelector(".avail");
+    const it = findItem(input.value);
+    if (!out) return;
+    if (!it) { out.textContent = input.value ? "Not in Item Master" : ""; return; }
+    const st = (await apiGet("/api/stock?item=" + encodeURIComponent(it["Item Code"]))).stock[0];
+    out.textContent = st ? `${it.Serialized === "Y" ? "Serialised · " : ""}` + st.locations.map(l => `${l.location}: ${fmtQty(l.quantity)}`).join(" · ")
+        : `${it.Serialized === "Y" ? "Serialised · " : ""}no stock`;
+}
+async function post(path, body, btn, resId, form, after) {
+    const r = await submitWith(document.getElementById(btn), () => apiPost(path, body));
+    if (!r) return;
+    showResult(document.getElementById(resId), r);
+    if (r.success) {
+        showToast(r.message);
+        if (form) { const keep = [...form.querySelectorAll("select")].map(s => s.value); form.reset(); form.querySelectorAll("select").forEach((s, i) => s.value = keep[i]);
+            form.querySelectorAll("input[type=date]").forEach(d => d.value = today()); form.querySelectorAll(".avail,.serial-count").forEach(x => x.textContent = ""); }
+        if (after) after();
+    }
+}
+function doDispatch() {
+    const f = document.getElementById("dForm"), body = formData(f);
+    body.lines = rowsData(document.getElementById("dRows")).filter(l => l.item);
+    post("/api/dispatch", body, "dBtn", "dRes", f, () => { document.getElementById("dRows").innerHTML = ""; addRow("dRows", true); loadItems(true); });
+}
+function doTransfer() {
+    const f = document.getElementById("tForm");
+    post("/api/transfer", formData(f), "tBtn", "tRes", f);
+}
+function doAdjust() {
+    const f = document.getElementById("aForm");
+    post("/api/adjust", formData(f), "aBtn", "aRes", f);
+}
+function doReturn() {
+    const f = document.getElementById("rForm"), body = formData(f);
+    body.lines = rowsData(document.getElementById("rRows")).filter(l => l.item);
+    post("/api/sales-return", body, "rBtn", "rRes", f, () => { document.getElementById("rRows").innerHTML = ""; addRow("rRows", false); });
+}
+window.refresh = () => loadItems(true);
+setup().then(() => initTabs(document.getElementById("root"))).catch(e => showToast(e.message, "error"));
+</script>
+</body>
+</html>

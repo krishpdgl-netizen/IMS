@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Production | Panache Factory Inventory</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="main">
+    <div id="pageHeader"></div>
+
+    <div class="grid-2">
+        <div class="section">
+            <div class="section-header"><div><h2>New work order</h2><p class="section-help">A work order builds finished units from SKD / CKD parts. Materials are issued from the Raw Store to the line, then consumed when you report output.</p></div></div>
+            <form id="woForm" class="form-grid cols-3" autocomplete="off" onsubmit="event.preventDefault(); createWo()">
+                <label class="wide req">Model to build<input name="fg_item" list="fgList" oninput="woPreview()"></label>
+                <label class="req">Planned qty<input name="planned_qty" type="number" min="1" step="1" oninput="woPreview()"></label>
+                <label class="req">Warehouse<select name="warehouse" id="woWh" onchange="woPreview()"></select></label>
+                <label>Build type<select name="build_type"><option>CKD</option><option>SKD</option><option>OTHER</option></select></label>
+                <label>Production line<input name="production_line" placeholder="LINE-1"></label>
+                <label>Target date<input name="target_date" type="date"></label>
+                <label>Source GRN<input name="source_grn" placeholder="optional, e.g. GRN-2026-0004"></label>
+                <label>Remarks<input name="remarks"></label>
+                <div class="full" id="woPreview"></div>
+                <div class="full"><div id="woResult" class="result"></div><div class="btn-row" style="margin-top:8px"><button class="btn" id="woBtn">Create work order</button></div></div>
+            </form>
+        </div>
+        <div class="section">
+            <div class="section-header"><h2>Can we build?</h2></div>
+            <div id="buildable"></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-header"><h2>Work orders</h2>
+            <label class="small" style="display:flex;gap:6px;align-items:center;font-weight:600;color:var(--ink-600)"><input type="checkbox" id="showClosed" style="width:auto" onchange="renderWos()"> Show closed</label>
+        </div>
+        <div id="woList"></div>
+    </div>
+</div>
+<datalist id="fgList"></datalist>
+
+<script src="app.js"></script>
+<script>
+initPage("Production", "Work orders for SKD / CKD assembly: issue parts, report finished units, return leftovers.");
+let WOS = [], BUILD = [];
+
+async function setup() {
+    const m = await loadMeta();
+    document.getElementById("woWh").innerHTML = options(m.warehouses, m.warehouses[0]);
+    await loadItems();
+    document.getElementById("fgList").innerHTML = ITEMS.filter(i => ["FG", "SUB_ASSEMBLY"].includes(i["Item Type"]))
+        .map(i => `<option value="${esc(i["Item Name"])}">${esc(i["Item Code"])}${i.has_bom ? " · BOM" : " · no BOM"}</option>`).join("");
+}
+function woPreview() {
+    const f = document.getElementById("woForm");
+    const it = findItem(f.fg_item.value);
+    const el = document.getElementById("woPreview");
+    if (!it) { el.innerHTML = ""; return; }
+    const b = BUILD.find(x => x.fg_item_code === it["Item Code"] && x.warehouse === f.warehouse.value);
+    const q = Number(f.planned_qty.value || 0);
+    if (!it.has_bom) { el.innerHTML = `<p class="notice">⚠ ${esc(it["Item Name"])} has no BOM. You can still create the order, but you'll enter consumed materials by hand. <a class="link-btn" href="masters.html#bom">Add BOM →</a></p>`; return; }
+    if (b) el.innerHTML = `<p class="notice">Raw Store at ${esc(b.warehouse)} can build <b>${b.buildable}</b> unit(s)${q > b.buildable ? ` - <span class="diff-neg">${q - b.buildable} short</span>, limited by ${esc(b.limited_by.join(", "))}` : ""}.</p>`;
+}
+async function createWo() {
+    const r = await submitWith(document.getElementById("woBtn"), () => apiPost("/api/wo", formData(document.getElementById("woForm"))));
+    if (!r) return;
+    showResult(document.getElementById("woResult"), r);
+    if (r.success) { document.getElementById("woForm").reset(); document.getElementById("woPreview").innerHTML = ""; refresh(); }
+}
+
+function renderBuild() {
+    document.getElementById("buildable").innerHTML = table(["Model", "Warehouse", "Units", "Limited by"],
+        BUILD.map(b => [esc(b.fg_item_name), esc(b.warehouse), `<b>${b.buildable}</b>`, `<span class="small muted">${esc(b.limited_by.join(", "))}</span>`]),
+        "No BOMs yet.");
+}
+function renderWos() {
+    const all = document.getElementById("showClosed").checked;
+    const list = WOS.filter(w => all || w.Status !== "CLOSED");
+    document.getElementById("woList").innerHTML = list.length ? list.map(w => {
+        const planned = Number(w["Planned Qty"]) || 1, prod = Number(w["Produced Qty"]) || 0, rej = Number(w["Rejected Qty"]) || 0;
+        const open = w.Status === "OPEN" || w.Status === "IN_PROGRESS";
+        const wip = w.materials.some(m => Number(m.in_wip) > 0);
+        return `<div class="wo-card">
+          <div class="wo-head">
+            <div><h3>${esc(w["WO No"])} · ${esc(w["FG Item Name"])}</h3>
+              <div class="small muted">${esc(w["Build Type"])} · ${esc(w.Warehouse)} · ${esc(w["Production Line"] || "no line")} · started ${fmtDate(w["Start Date"])}${w["Target Date"] ? " · target " + fmtDate(w["Target Date"]) : ""}${w["Source GRN"] ? " · from " + esc(w["Source GRN"]) : ""}</div></div>
+            <div class="btn-row">${statusPill(w.Status)}</div>
+          </div>
+          <div class="progress"><div style="width:${prod / planned * 100}%"></div><div class="rej" style="width:${rej / planned * 100}%"></div></div>
+          <div class="small"><b>${fmtQty(prod)}</b> good${rej ? `, <span class="diff-neg">${fmtQty(rej)} rejected</span>` : ""} of ${fmtQty(planned)} planned</div>
+          ${open ? `<div class="btn-row" style="margin-top:10px">
+            <button class="btn small" onclick="issueBom('${w["WO No"]}')">Issue per BOM</button>
+            <button class="btn small secondary" onclick="issueModal('${w["WO No"]}')">Issue items…</button>
+            <button class="btn small" onclick="outputModal('${w["WO No"]}')">Report output…</button>
+            <button class="btn small secondary" onclick="returnModal('${w["WO No"]}')" ${wip ? "" : "disabled"}>Return material…</button>
+            <button class="btn small danger" onclick="closeWo('${w["WO No"]}', ${wip})">Close WO</button></div>` : ""}
+          <details ${open ? "open" : ""}><summary>Materials</summary>
+          ${table(["Component", "Per unit", "Required", "Issued", "Consumed", "On line", "Still to issue", "In store"], w.materials.map(m => [
+              esc(m.item_name) + (m.not_in_bom ? ' <span class="pill warn">not in BOM</span>' : ""), m.qty_per_unit, fmtQty(m.required), fmtQty(m.issued), fmtQty(m.consumed),
+              `<b>${fmtQty(m.in_wip)}</b>`, Number(m.to_issue) > 0 ? `<span class="diff-pos">${fmtQty(m.to_issue)}</span>` : "0",
+              Number(m.to_issue) > Number(m.in_store) ? `<span class="diff-neg">${fmtQty(m.in_store)}</span>` : fmtQty(m.in_store)]), "No BOM and nothing issued yet.")}
+          </details></div>`;
+    }).join("") : `<p class="empty-note">No work orders yet.</p>`;
+}
+
+/* ----- issue ----- */
+async function issueBom(no) {
+    let r = await apiPost("/api/wo/issue", { wo_no: no, issue_per_bom: true });
+    if (!r.success && /short/i.test(r.message)) {
+        if (!confirm(r.message + "\n\nIssue what IS available now?")) return;
+        r = await apiPost("/api/wo/issue", { wo_no: no, issue_per_bom: true, allow_partial: true });
+    }
+    showToast(r.message, r.success ? "" : "error");
+    if (r.success) refresh();
+}
+function itemRow(withSerials) {
+    return `<div class="simple-row" data-row>
+        <input data-k="item" list="itemList" placeholder="Item">
+        <input data-k="qty" type="number" min="0" step="any" placeholder="Qty">
+        <span></span>
+        ${withSerials ? `<textarea data-k="serials" data-serials rows="1" placeholder="Serials (if serialized)"></textarea>` : "<span></span>"}
+        <button type="button" class="link-btn" onclick="this.parentElement.remove()">✕</button></div>`;
+}
+function issueModal(no) {
+    openModal(`Issue items to ${no}`, `
+      <p class="notice">Moves stock from the Raw Store to the production line (WIP) for this order. Serialised parts need their serial numbers.</p>
+      <div id="rows">${itemRow(true)}</div>
+      <button type="button" class="btn small secondary" onclick="document.getElementById('rows').insertAdjacentHTML('beforeend', itemRow(true))">＋ Add item</button>
+      <div id="mRes" class="result"></div>
+      <div class="modal-actions"><button class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="mBtn" onclick="doIssue('${no}')">Issue</button></div>`, true);
+}
+async function doIssue(no) {
+    const lines = rowsData(document.getElementById("rows")).filter(l => l.item);
+    const r = await submitWith(document.getElementById("mBtn"), () => apiPost("/api/wo/issue", { wo_no: no, lines }));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("mRes"), r);
+    closeModal(); showToast(r.message); refresh();
+}
+
+/* ----- output ----- */
+function outputModal(no) {
+    const w = WOS.find(x => x["WO No"] === no);
+    const fg = findItem(w["FG Item Code"]) || {};
+    const hasBom = w.materials.some(m => !m.not_in_bom);
+    const serialComps = w.materials.filter(m => (findItem(m.item_code) || {}).Serialized === "Y");
+    const left = Number(w["Planned Qty"]) - Number(w["Produced Qty"]) - Number(w["Rejected Qty"]);
+    openModal(`Report output - ${no}`, `
+      <form id="outForm" class="form-grid" onsubmit="event.preventDefault(); doOutput('${no}')">
+        <label class="req">Units finished<input name="qty" type="number" min="1" max="${left}" step="1" value="${left > 0 ? Math.min(left, 1) : ""}"></label>
+        <label>Send to<select name="zone"><option value="FG_STORE">Finished Goods Store (QC passed)</option><option value="QC_HOLD">QC Hold (inspect first)</option><option value="QUARANTINE">Quarantine (rejected units)</option></select></label>
+        <label class="req">Bin / rack<input name="bin" placeholder="FG-R1"></label>
+        <label>Date<input name="date" type="date" value="${today()}"></label>
+        ${fg.Serialized === "Y" ? `<label class="full req">Serial numbers of finished units <span class="hint">one per line, or "SERIAL | MAC/IMEI"</span><textarea name="fg_serials" data-serials rows="4"></textarea><span class="serial-count"></span></label>` : ""}
+        ${serialComps.length && fg.Serialized === "Y" ? `<label class="full">Which part serial went into which unit <span class="hint">optional, e.g. "TV43-0001: MB-1234, PNL-5678". Unlisted serialised parts are taken oldest first from the line.</span><textarea name="component_map" rows="3"></textarea></label>` : ""}
+        ${hasBom ? `<p class="full notice">Components are consumed from the line per the BOM: ${w.materials.filter(m => !m.not_in_bom).map(m => `${esc(m.item_name)} × ${m.qty_per_unit}`).join(", ")}.</p>`
+          : `<div class="full"><div class="form-title">Materials consumed (no BOM)</div><div id="cons">${itemRow(true)}</div>
+             <button type="button" class="btn small secondary" onclick="document.getElementById('cons').insertAdjacentHTML('beforeend', itemRow(true))">＋ Add material</button></div>`}
+        <label class="full">Remarks<input name="remarks"></label>
+        <div class="full"><div id="mRes" class="result"></div>
+        <div class="modal-actions"><button type="button" class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="mBtn">Save output</button></div></div>
+      </form>`, true);
+}
+async function doOutput(no) {
+    const body = { wo_no: no, ...formData(document.getElementById("outForm")) };
+    const cons = document.getElementById("cons");
+    if (cons) body.consumption = rowsData(cons).filter(l => l.item);
+    const r = await submitWith(document.getElementById("mBtn"), () => apiPost("/api/wo/output", body));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("mRes"), r);
+    closeModal(); showToast(r.message); refresh();
+}
+
+/* ----- return / close ----- */
+function returnModal(no) {
+    openModal(`Return material from ${no}`, `
+      <form id="retForm" class="form-grid cols-3" onsubmit="event.preventDefault(); doReturn('${no}')">
+        <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="return_all" value="1" style="width:auto" onchange="document.getElementById('retRows').hidden=this.checked"> Return everything still on the line</label>
+        <div class="full" id="retRows"><div id="rows">${itemRow(true)}</div>
+          <button type="button" class="btn small secondary" onclick="document.getElementById('rows').insertAdjacentHTML('beforeend', itemRow(true))">＋ Add item</button></div>
+        <label>Return to<select name="zone"><option value="RAW_STORE">Raw Store (good)</option><option value="QUARANTINE">Quarantine (defective)</option></select></label>
+        <label class="req">Bin / rack<input name="bin"></label>
+        <label>Remarks<input name="remarks"></label>
+        <div class="full"><div id="mRes" class="result"></div>
+        <div class="modal-actions"><button type="button" class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="mBtn">Return</button></div></div>
+      </form>`, true);
+}
+async function doReturn(no) {
+    const f = formData(document.getElementById("retForm"));
+    const body = { wo_no: no, zone: f.zone, bin: f.bin, remarks: f.remarks, return_all: !!f.return_all };
+    if (!body.return_all) body.lines = rowsData(document.getElementById("rows")).filter(l => l.item);
+    const r = await submitWith(document.getElementById("mBtn"), () => apiPost("/api/wo/return", body));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("mRes"), r);
+    closeModal(); showToast(r.message); refresh();
+}
+async function closeWo(no, wip) {
+    let bin = "";
+    if (wip) {
+        bin = prompt("Material is still on the line for " + no + ". It will be returned to the Raw Store.\nEnter the bin / rack to return it to:");
+        if (!bin) return;
+    } else if (!confirm("Close " + no + "? No more output can be reported on it.")) return;
+    const r = await apiPost("/api/wo/close", { wo_no: no, return_bin: bin });
+    showToast(r.message, r.success ? "" : "error");
+    if (r.success) refresh();
+}
+
+async function refresh() {
+    const [w, b] = await Promise.all([apiGet("/api/wo"), apiGet("/api/buildable")]);
+    WOS = w.work_orders || []; BUILD = b.buildable || [];
+    renderWos(); renderBuild(); woPreview();
+}
+window.refresh = refresh;
+setup().then(refresh).catch(e => showToast(e.message, "error"));
+</script>
+</body>
+</html>
