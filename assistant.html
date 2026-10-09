@@ -3,60 +3,115 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Assistant | Panache Factory Inventory</title>
+    <title>AI Warehouse Assistant | Inventory Management System</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="main">
-    <div id="pageHeader"></div>
-    <div class="section" style="padding:18px 22px;">
-        <div class="chat-hints">
-            <button class="chat-hint" data-msg="where is serial TV43-0001?">Trace a serial</button>
-            <button class="chat-hint" data-msg="how many 43 inch TVs can we build right now?">Can we build?</button>
-            <button class="chat-hint" data-msg="what is waiting for QC?">Pending QC</button>
-            <button class="chat-hint" data-msg="status of open work orders">Work orders</button>
-            <button class="chat-hint" data-msg="what stock is in Bhiwandi quarantine?">Quarantine stock</button>
-            <button class="chat-hint" data-msg="what's been sitting in stock for too long?">Aging stock</button>
+    <div class="sidebar">
+        <div class="logo">📦 Inventory<span>MS</span></div>
+        <div class="menu">
+            <a href="dashboard.html">Dashboard</a>
+            <a href="assistant.html" class="active">AI Warehouse Assistant</a>
+            <a href="reports.html">Reports</a>
         </div>
-        <div class="chat-wrap">
-            <div class="chat-log" id="chatLog">
-                <div class="msg bot">Ask me about stock, serials, GRNs, QC or work orders - every number comes straight from the ledger.
-I can also log simple dispatches, transfers, adjustments and issues to a work order. Receiving goods (GRN) and production output are done on their own pages, because they need invoices, serials and QC.</div>
+        <div class="sidebar-footer">Powered by Gemini<br>Every reply is grounded in the live ledger — the AI never guesses a quantity.</div>
+    </div>
+
+    <div class="main">
+        <div class="header">
+            <h1>AI Warehouse Assistant</h1>
+            <div class="header-actions">
+                <button class="logout-btn" id="undoBtn">↶ Undo last</button>
+                <div class="profile" id="profileName">—</div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
             </div>
-            <form class="chat-input-row" id="chatForm">
-                <input type="text" id="chatInput" placeholder="e.g. moved 20 back covers from Bhiwandi to Ghatkopar bin G-R2" autocomplete="off" required>
-                <button type="submit" id="sendBtn">Send</button>
-            </form>
+        </div>
+
+        <div class="section" style="padding:20px 24px;">
+            <div class="chat-hints">
+                <button class="chat-hint" data-msg="how much stock do we have in Bhiwandi?">Ask stock levels</button>
+                <button class="chat-hint" data-msg="where is serial number TV43-0001?">Find a serial</button>
+                <button class="chat-hint" data-msg="how many TVs can we assemble from the parts in stock?">Can we assemble?</button>
+                <button class="chat-hint" data-msg="what is waiting for QC?">Waiting for QC</button>
+                <button class="chat-hint" data-msg="what's been sitting in stock for too long?">Ask about aging stock</button>
+            </div>
+
+            <div class="chat-wrap">
+                <div class="chat-log" id="chatLog">
+                    <div class="msg bot">Hi! Tell me about a delivery, dispatch, transfer, or stock correction — or just ask
+                        me how much of something you have, where it's kept, or where a serial number is.</div>
+                </div>
+                <form class="chat-input-row" id="chatForm">
+                    <input type="text" id="chatInput" placeholder="e.g. moved 20 back covers from Bhiwandi to Ghatkopar, rack G-2" autocomplete="off" required>
+                    <button type="submit" id="sendBtn">Send</button>
+                </form>
+            </div>
         </div>
     </div>
-</div>
-<script src="app.js"></script>
-<script>
-initPage("AI Assistant", "Plain-English questions and quick stock moves.");
-const chatLog = document.getElementById("chatLog"), chatInput = document.getElementById("chatInput"), sendBtn = document.getElementById("sendBtn");
-function addMsg(text, who, cls) {
-    const d = document.createElement("div");
-    d.className = `msg ${who}${cls ? " " + cls : ""}`;
-    d.textContent = text;
-    chatLog.appendChild(d);
-    chatLog.scrollTop = chatLog.scrollHeight;
-    return d;
-}
-async function send(text) {
-    addMsg(text, "user");
-    chatInput.value = ""; sendBtn.disabled = true;
-    const thinking = addMsg("Thinking…", "bot");
-    try {
-        const r = await apiPost("/api/chat", { message: text });
-        thinking.remove();
-        const warn = (r.warnings || []).length ? "\n⚠ " + r.warnings.join("\n⚠ ") : "";
-        if (r.success === false) addMsg((r.message || "Sorry, I couldn't do that.") + warn, "bot", "error");
-        else addMsg(r.message + warn + (r.txn_id ? `\n(${r.txn_id} - use Undo last to reverse)` : ""), "bot", r.type === "query" ? "" : "applied");
-    } catch (e) { thinking.remove(); addMsg("Could not reach the server: " + e.message, "bot", "error"); }
-    finally { sendBtn.disabled = false; chatInput.focus(); }
-}
-document.getElementById("chatForm").addEventListener("submit", e => { e.preventDefault(); const t = chatInput.value.trim(); if (t) send(t); });
-document.querySelectorAll(".chat-hint").forEach(b => b.addEventListener("click", () => send(b.dataset.msg)));
-</script>
+
+    <script src="app.js"></script>
+    <script>
+        requireLogin();
+        document.getElementById("profileName").textContent = localStorage.getItem("userName");
+
+        const chatLog = document.getElementById("chatLog");
+        const chatForm = document.getElementById("chatForm");
+        const chatInput = document.getElementById("chatInput");
+        const sendBtn = document.getElementById("sendBtn");
+
+        function addMsg(text, who, extraClass) {
+            const div = document.createElement("div");
+            div.className = `msg ${who}${extraClass ? " " + extraClass : ""}`;
+            div.textContent = text;
+            chatLog.appendChild(div);
+            chatLog.scrollTop = chatLog.scrollHeight;
+            return div;
+        }
+
+        async function sendMessage(text) {
+            addMsg(text, "user");
+            chatInput.value = "";
+            sendBtn.disabled = true;
+            const thinking = addMsg("Thinking…", "bot");
+            try {
+                const res = await apiPost("/api/chat", { message: text, entered_by: localStorage.getItem("userName") });
+                thinking.remove();
+                if (res.success === false) {
+                    addMsg(res.message || "Sorry, I couldn't process that.", "bot", "error");
+                } else if (res.type === "query") {
+                    addMsg(res.message, "bot");
+                } else {
+                    addMsg(res.message, "bot", "applied");
+                }
+            } catch (err) {
+                thinking.remove();
+                addMsg("Could not reach the server: " + err.message, "bot", "error");
+            } finally {
+                sendBtn.disabled = false;
+                chatInput.focus();
+            }
+        }
+
+        chatForm.addEventListener("submit", (e) => {
+            e.preventDefault();
+            const text = chatInput.value.trim();
+            if (!text) return;
+            sendMessage(text);
+        });
+
+        document.querySelectorAll(".chat-hint").forEach(btn => {
+            btn.addEventListener("click", () => sendMessage(btn.dataset.msg));
+        });
+
+        document.getElementById("undoBtn").addEventListener("click", async () => {
+            try {
+                const res = await apiPost("/api/undo", {});
+                showToast(`Reversed: ${res.reversed.action} — ${res.reversed.product}`);
+                addMsg(`Undone the last applied transaction (${res.reversed.action} — ${res.reversed.product}).`, "bot");
+            } catch (err) {
+                showToast("Nothing to undo: " + err.message);
+            }
+        });
+    </script>
 </body>
 </html>
