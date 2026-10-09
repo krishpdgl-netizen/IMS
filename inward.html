@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inward & QC | Panache Factory Inventory</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="main" id="root">
+    <div id="pageHeader"></div>
+
+    <div class="tabs">
+        <button data-tab="new">New GRN</button>
+        <button data-tab="qc">Pending QC <span id="qcCount"></span></button>
+        <button data-tab="grns">GRN register</button>
+    </div>
+
+    <!-- ================= NEW GRN ================= -->
+    <div class="tab-panel" id="new">
+      <form id="grnForm" class="section" autocomplete="off" onsubmit="event.preventDefault(); saveGrn(false)">
+        <div class="section-header">
+            <div><h2>Goods Receipt Note (GRN)</h2><p class="section-help">One GRN per shipment / supplier invoice. Each line is one item; serialised items need one serial per unit.</p></div>
+            <div class="btn-row">
+                <button type="button" class="btn amber" onclick="document.getElementById('docFile').click()">⌕ Fill from invoice / BoE scan</button>
+                <input type="file" id="docFile" hidden accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" onchange="scanDoc(this)">
+            </div>
+        </div>
+        <div id="scanStatus" class="notice" hidden></div>
+
+        <div class="form-title">1. Inward type</div>
+        <div class="type-choice" id="typeChoice"></div>
+
+        <div class="form-title">2. Shipment & supplier</div>
+        <div class="form-grid">
+            <label class="req">Warehouse<select name="warehouse" id="whSel"></select></label>
+            <label class="req">GRN date<input type="date" name="grn_date"></label>
+            <label class="wide req">Supplier<input name="supplier" list="supplierList" placeholder="e.g. Shenzhen Vision Electronics Co."></label>
+            <label class="req">Supplier invoice no.<input name="invoice_no"></label>
+            <label>Invoice date<input type="date" name="invoice_date"></label>
+            <label>PO no.<input name="po_no"></label>
+            <label>Invoice value<input name="invoice_value" type="number" step="0.01" min="0"></label>
+            <label>Currency<select name="currency"></select></label>
+            <label>Vehicle no.<input name="vehicle_no" placeholder="MH04 AB 1234"></label>
+            <label>Gate entry no.<input name="gate_entry_no"></label>
+            <label>QC at receipt
+                <select name="qc_status"><option value="PENDING">Pending - put in QC Hold</option><option value="PASSED">Already passed - straight to store</option></select>
+            </label>
+        </div>
+
+        <div id="importBox">
+            <div class="form-title">3. Import documents</div>
+            <div class="form-grid">
+                <label>Country of origin<input name="country_of_origin" placeholder="China"></label>
+                <label>Exchange rate (to INR)<input name="exchange_rate" type="number" step="0.0001" min="0"></label>
+                <label>BL / AWB no.<input name="bl_awb_no"></label>
+                <label>Container no.<input name="container_no"></label>
+                <label>Bill of Entry no.<input name="bill_of_entry_no"></label>
+                <label>BoE date<input type="date" name="boe_date"></label>
+                <label>Port of entry<input name="port_of_entry" placeholder="Nhava Sheva / Mumbai Air Cargo"></label>
+            </div>
+        </div>
+
+        <div id="kitBox">
+            <div class="form-title">Kit details <span class="hint">- for SKD / CKD, checks the shipment against the BOM</span></div>
+            <div class="form-grid">
+                <label class="wide">Kits are for model<input name="kit_for_item" list="fgList" placeholder="Finished model these parts build"></label>
+                <label>No. of kits / sets<input name="kits_count" type="number" min="0" step="1"></label>
+                <label>&nbsp;<button type="button" class="btn secondary" onclick="fillFromBom()">Fill lines from BOM</button></label>
+            </div>
+        </div>
+
+        <div class="form-title">Items received</div>
+        <div id="lines"></div>
+        <button type="button" class="btn secondary" onclick="addLine()">＋ Add item line</button>
+
+        <div class="form-grid" style="margin-top:14px">
+            <label class="full">Remarks<input name="remarks"><input type="hidden" name="source_document"></label>
+        </div>
+
+        <div id="kitResult"></div>
+        <div id="grnResult" class="result"></div>
+        <div class="btn-row sticky-actions">
+            <button type="button" class="btn secondary" id="checkBtn" onclick="saveGrn(true)">Check (doesn't save)</button>
+            <button type="submit" class="btn" id="saveBtn">Save GRN</button>
+            <button type="button" class="btn-ghost" onclick="resetGrn()">Clear form</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- ================= PENDING QC ================= -->
+    <div class="tab-panel" id="qc" hidden>
+        <div class="section">
+            <div class="section-header"><div><h2>Waiting for QC</h2><p class="section-help">Stock received with QC pending, and production output sent to QC. Passed stock moves to the store; rejected stock goes to Quarantine.</p></div></div>
+            <div id="qcTable"></div>
+        </div>
+    </div>
+
+    <!-- ================= GRN REGISTER ================= -->
+    <div class="tab-panel" id="grns" hidden>
+        <div class="section">
+            <div class="section-header"><h2>GRN register</h2>
+                <input id="grnSearch" placeholder="Search supplier, invoice, BoE, GRN…" style="max-width:280px" oninput="renderGrns()"></div>
+            <div id="grnTable"></div>
+        </div>
+    </div>
+</div>
+
+<datalist id="supplierList"></datalist>
+<datalist id="fgList"></datalist>
+
+<script src="app.js"></script>
+<script>
+initPage("Inward (GRN) & QC", "Receive CBU, SKD, CKD and local shipments; record QC.");
+let GRNS = [];
+let lineSeq = 0;
+
+const TYPE_HELP = {
+    CBU: "Finished units, ready to sell. Serials needed per unit.",
+    SKD: "Semi-built units needing final assembly.",
+    CKD: "Loose parts / kits for assembly on the line.",
+    LOCAL: "Bought from an Indian supplier.",
+};
+
+async function setup() {
+    const m = await loadMeta();
+    document.getElementById("typeChoice").innerHTML = Object.keys(m.inward_types).map((t, i) =>
+        `<label><input type="radio" name="inward_type" value="${t}" ${i === 0 ? "checked" : ""} onchange="typeChanged()"><span><b>${t}</b><small>${esc(TYPE_HELP[t] || m.inward_types[t])}</small></span></label>`).join("");
+    document.getElementById("whSel").innerHTML = options(m.warehouses, m.warehouses[0]);
+    document.querySelector('[name=currency]').innerHTML = options(["USD", "CNY", "INR", "EUR", "JPY", "KRW", "HKD", "TWD"], "USD");
+    document.querySelector('[name=grn_date]').value = today();
+    await loadItems();
+    fillFgList();
+    typeChanged();
+    if (!document.querySelector("#lines [data-row]")) addLine();
+}
+function fillFgList() {
+    document.getElementById("fgList").innerHTML = ITEMS.filter(i => ["FG", "SUB_ASSEMBLY"].includes(i["Item Type"]))
+        .map(i => `<option value="${esc(i["Item Name"])}">${esc(i["Item Code"])}${i.has_bom ? " · BOM" : " · no BOM"}</option>`).join("");
+}
+function itype() { return (document.querySelector('[name=inward_type]:checked') || {}).value; }
+function typeChanged() {
+    const t = itype();
+    document.getElementById("importBox").hidden = t === "LOCAL";
+    document.getElementById("kitBox").hidden = !(t === "SKD" || t === "CKD");
+    const cur = document.querySelector('[name=currency]');
+    if (t === "LOCAL") cur.value = "INR"; else if (cur.value === "INR") cur.value = "USD";
+}
+
+/* ---------- line items ---------- */
+function addLine(pre) {
+    pre = pre || {};
+    const id = ++lineSeq;
+    const div = document.createElement("div");
+    div.className = "line-card";
+    div.dataset.row = id;
+    div.innerHTML = `
+      <div class="line-head"><b>Line <span class="ln"></span></b><button type="button" class="link-btn" onclick="this.closest('[data-row]').remove(); renumber()">Remove</button></div>
+      <div class="line-grid">
+        <label class="field req">Item (name or code)<input data-k="item" list="itemList" value="${esc(pre.item || "")}" oninput="lineChanged(this)"></label>
+        <label class="field req">Invoice qty<input data-k="invoice_qty" type="number" min="0" step="any" value="${esc(pre.invoice_qty ?? "")}" oninput="lineChanged(this)"></label>
+        <label class="field">Received qty<input data-k="received_qty" type="number" min="0" step="any" placeholder="= invoice" value="${esc(pre.received_qty ?? "")}" oninput="lineChanged(this)"></label>
+        <label class="field">Damaged qty<input data-k="damaged_qty" type="number" min="0" step="any" value="${esc(pre.damaged_qty ?? "")}" oninput="lineChanged(this)"></label>
+        <label class="field req">Bin / rack<input data-k="bin" value="${esc(pre.bin || "")}" placeholder="R-A3-S2"></label>
+        <label class="field">Unit price<input data-k="unit_price" type="number" min="0" step="any" value="${esc(pre.unit_price ?? "")}"></label>
+        <label class="field">Lot / batch no.<input data-k="lot_no" value="${esc(pre.lot_no || "")}"></label>
+        <label class="field">Mfg date<input data-k="mfg_date" type="date"></label>
+        <label class="field">HSN code<input data-k="hsn_code" value="${esc(pre.hsn_code || "")}"></label>
+        <label class="field">QC for this line<select data-k="qc_status"><option value="">Same as GRN</option><option>PENDING</option><option>PASSED</option></select></label>
+        <label class="field span-2">Remarks<input data-k="remarks"></label>
+        <div class="new-item-box" hidden>
+          <p><b>New item.</b> It will be added to the Item Master when you save.</p>
+          <label class="field">Item code<input data-k="item_code" placeholder="blank = auto"></label>
+          <label class="field req">Item type<select data-k="item_type">${options(META.item_types, "", "Choose…")}</select></label>
+          <label class="field req">Serialized?<select data-k="serialized" onchange="lineChanged(this)"><option value="N">No - count only</option><option value="Y">Yes - one serial per unit</option></select></label>
+          <label class="field">Unit<input data-k="unit" placeholder="pcs"></label>
+        </div>
+        <label class="field span-3 serials-box" hidden>Serial numbers of good units <span class="hint">one per line, or "SERIAL | MAC/IMEI"</span>
+          <textarea data-k="serials" data-serials rows="3">${esc(Array.isArray(pre.serials) ? pre.serials.join("\n") : (pre.serials || ""))}</textarea><span class="serial-count"></span></label>
+        <label class="field span-3 dserials-box" hidden>Serial numbers of damaged units
+          <textarea data-k="damaged_serials" data-serials rows="3"></textarea><span class="serial-count"></span></label>
+        <label class="field span-2 dbin-box" hidden>Quarantine bin for damaged<input data-k="damaged_bin" placeholder="QUARANTINE"></label>
+      </div>
+      <div class="line-summary"></div>`;
+    document.getElementById("lines").appendChild(div);
+    if (pre.is_new) {
+        const box = div.querySelector(".new-item-box");
+        box.querySelector('[data-k=item_code]').value = pre.item_code || "";
+        box.querySelector('[data-k=item_type]').value = pre.item_type || "";
+    }
+    renumber();
+    lineChanged(div.querySelector("[data-k=item]"));
+    return div;
+}
+function renumber() { document.querySelectorAll("#lines [data-row] .ln").forEach((el, i) => el.textContent = i + 1); }
+function lineChanged(el) {
+    const row = el.closest("[data-row]");
+    const v = k => row.querySelector(`[data-k=${k}]`).value.trim();
+    const it = findItem(v("item"));
+    const isNew = v("item") && !it;
+    row.querySelector(".new-item-box").hidden = !isNew;
+    const serialized = it ? it.Serialized === "Y" : (isNew && v("serialized") === "Y");
+    const inv = Number(v("invoice_qty") || 0), rec = v("received_qty") === "" ? inv : Number(v("received_qty"));
+    const dmg = Number(v("damaged_qty") || 0), acc = Math.max(rec - dmg, 0), short = Math.max(inv - rec, 0);
+    row.querySelector(".serials-box").hidden = !serialized;
+    row.querySelector(".dserials-box").hidden = !(serialized && dmg > 0);
+    row.querySelector(".dbin-box").hidden = !(dmg > 0);
+    let txt = it ? `<span class="type-tag">${esc(it["Item Code"])}</span> <span class="type-tag">${esc(it["Item Type"])}</span> ${serialized ? '<span class="type-tag">SERIALIZED</span>' : ""} · ` : "";
+    if (inv || rec) txt += `Accepted <b>${fmtQty(acc)}</b>` + (short ? ` · <span class="diff-neg">short ${fmtQty(short)}</span>` : "") +
+        (rec > inv && inv ? ` · <span class="diff-pos">excess ${fmtQty(rec - inv)}</span>` : "") + (dmg ? ` · <span class="diff-neg">${fmtQty(dmg)} damaged → quarantine</span>` : "");
+    if (serialized) txt += ` · need <b>${fmtQty(acc)}</b> serial(s)`;
+    row.querySelector(".line-summary").innerHTML = txt;
+}
+
+async function fillFromBom() {
+    const fg = document.querySelector('[name=kit_for_item]').value.trim();
+    const kits = Number(document.querySelector('[name=kits_count]').value || 0);
+    if (!fg || !kits) return showToast("Enter the model and number of kits first.", "error");
+    const r = await apiGet("/api/bom?fg=" + encodeURIComponent(fg));
+    if (!r.fg) return showToast("That model is not in the Item Master.", "error");
+    if (!r.lines.length) return showToast(`${r.fg["Item Name"]} has no BOM yet - add it under Items & BOM.`, "error");
+    document.querySelectorAll("#lines [data-row]").forEach(row => { if (!row.querySelector("[data-k=item]").value.trim()) row.remove(); });
+    r.lines.forEach(l => addLine({ item: l["Component Name"], invoice_qty: Math.round(Number(l["Qty Per Unit"]) * kits * 10000) / 10000 }));
+    showToast(`${r.lines.length} BOM lines added. Adjust received / damaged quantities to what actually arrived.`);
+}
+
+/* ---------- save ---------- */
+function collectGrn() {
+    const body = formData(document.getElementById("grnForm"));
+    body.lines = rowsData(document.getElementById("lines")).filter(l => l.item).map(l => {
+        const it = findItem(l.item);
+        if (it) { l.item_code = it["Item Code"]; delete l.item_type; delete l.serialized; }
+        else { l.item_name = l.item; }
+        return l;
+    });
+    return body;
+}
+async function saveGrn(dry) {
+    const btn = document.getElementById(dry ? "checkBtn" : "saveBtn");
+    const body = collectGrn();
+    const r = await submitWith(btn, () => apiPost("/api/inward" + (dry ? "?dry_run=true" : ""), body));
+    if (!r) return;
+    const resEl = document.getElementById("grnResult");
+    if (dry && r.success) {
+        r.message = "Everything checks out. " + r.message.replace(/^GRN-\d+-\d+ saved/, "Will save as") + " (Not saved yet.)";
+    }
+    showResult(resEl, r);
+    renderKit(r.kit_check);
+    if (r.success && !dry) {
+        showToast(r.grn_no + " saved.");
+        resetGrn(true);
+        await loadItems(true); fillFgList();
+        loadQc(); loadGrns();
+    }
+    resEl.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+function renderKit(k) {
+    const el = document.getElementById("kitResult");
+    if (!k) { el.innerHTML = ""; return; }
+    el.innerHTML = `<div class="kit-box"><div class="section-header"><h2>Kit check: ${esc(k.kit_item || "")} × ${esc(k.kits ?? "")}</h2>${statusPill(k.status)}</div>
+        ${table(["Component", "Required", "Received (good)", "Difference"], (k.lines || []).map(l => [
+            esc(l.item_name) + (l.not_in_bom ? ' <span class="pill warn">not in BOM</span>' : ""), fmtQty(l.required), fmtQty(l.received),
+            `<span class="${l.difference < 0 ? "diff-neg" : l.difference > 0 ? "diff-pos" : ""}">${l.difference > 0 ? "+" : ""}${fmtQty(l.difference)}</span>`]))}</div>`;
+}
+function resetGrn(keepResult) {
+    const f = document.getElementById("grnForm");
+    const t = itype(), wh = f.warehouse.value;
+    f.reset();
+    f.querySelector(`[name=inward_type][value=${t}]`).checked = true;
+    f.warehouse.value = wh;
+    f.grn_date.value = today();
+    f.source_document.value = "";
+    document.getElementById("lines").innerHTML = "";
+    if (!keepResult) { document.getElementById("grnResult").style.display = "none"; renderKit(null); }
+    document.getElementById("scanStatus").hidden = true;
+    typeChanged();
+    addLine();
+}
+
+/* ---------- document scan ---------- */
+async function scanDoc(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const st = document.getElementById("scanStatus");
+    st.hidden = false;
+    st.innerHTML = '<span class="spinner"></span> Reading the document…';
+    try {
+        const fd = new FormData(); fd.append("file", file);
+        const res = await fetch(API_BASE + "/api/scan-document", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.detail || "Could not read the document.");
+        const d = data.document, f = document.getElementById("grnForm");
+        if (d.suggested_inward_type && f.querySelector(`[name=inward_type][value=${d.suggested_inward_type}]`)) {
+            f.querySelector(`[name=inward_type][value=${d.suggested_inward_type}]`).checked = true; typeChanged();
+        }
+        const set = (name, v) => { if (v !== null && v !== undefined && v !== "" && f[name]) f[name].value = v; };
+        set("supplier", d.supplier); set("invoice_no", d.invoice_no); set("invoice_date", d.invoice_date); set("po_no", d.po_no);
+        set("currency", d.currency); set("invoice_value", d.invoice_value); set("country_of_origin", d.country_of_origin);
+        set("bl_awb_no", d.bl_awb_no); set("container_no", d.container_no); set("bill_of_entry_no", d.bill_of_entry_no);
+        set("boe_date", d.boe_date); set("port_of_entry", d.port_of_entry); set("vehicle_no", d.vehicle_no);
+        f.source_document.value = file.name;
+        const items = d.items || [];
+        if (items.length) {
+            document.getElementById("lines").innerHTML = "";
+            items.forEach(i => {
+                const known = findItem(i.item_code) || findItem(i.item_name);
+                addLine({ item: known ? known["Item Name"] : i.item_name, invoice_qty: i.qty, unit_price: i.unit_price,
+                    hsn_code: i.hsn_code, serials: i.serials || [], is_new: !known, item_code: known ? "" : (i.item_code || "") });
+            });
+        }
+        st.innerHTML = `<b>Filled from ${esc(file.name)}</b> (${esc(d.document_type || "document")}${d.direction === "OUTWARD" ? " - looks like an <b>outward</b> document; use Dispatch instead" : ""}). ` +
+            `Check every field before saving; fill bins and serials. ${esc(d.confidence_notes || "")}`;
+    } catch (e) {
+        st.innerHTML = "⚠ " + esc(e.message);
+    } finally { input.value = ""; }
+}
+
+/* ---------- QC ---------- */
+let QC = [];
+async function loadQc() {
+    QC = (await apiGet("/api/pending-qc")).batches || [];
+    document.getElementById("qcCount").innerHTML = QC.length ? `<span class="pill warn">${QC.length}</span>` : "";
+    document.getElementById("qcTable").innerHTML = table(["Item", "From", "Warehouse / bin", "Waiting", "Since", ""],
+        QC.map((b, i) => [`<b>${esc(b["Item Name"])}</b><br><span class="small muted">${esc(b["Item Code"])}${b.serialized ? " · serialized" : ""}</span>`,
+            esc(b["GRN No"] || b["Work Order"] || b.Source) + `<br><span class="small muted">${esc(b["Inward Type"])}</span>`,
+            `${esc(b.Warehouse)} / ${esc(b.Bin)}`, `<b>${fmtQty(b["Qty Remaining"])}</b> ${esc(b.Unit)}`, fmtDate(b["Date Received"]),
+            `<button class="btn small" onclick="openQc(${i})">Record QC</button>`]), "Nothing is waiting for QC.");
+}
+function openQc(i) {
+    const b = QC[i];
+    const store = b["Item Type"] === "FG" ? "FG_STORE" : "RAW_STORE";
+    openModal(`QC: ${b["Item Name"]} (${b["GRN No"] || b["Work Order"]})`, `
+      <p class="notice">${fmtQty(b["Qty Remaining"])} ${esc(b.Unit)} waiting at ${esc(b.Warehouse)} / ${esc(b.Bin)}. You can record part of the batch now and the rest later.</p>
+      <form id="qcForm" class="form-grid cols-2" onsubmit="event.preventDefault(); saveQc('${esc(b["Batch ID"])}')">
+        <label>Passed qty<input name="pass_qty" type="number" min="0" step="any" value="${b["Qty Remaining"]}"></label>
+        <label>Rejected qty<input name="reject_qty" type="number" min="0" step="any" value="0"></label>
+        <label>Passed stock goes to<select name="pass_zone">${options({ RAW_STORE: "Raw / Parts Store", FG_STORE: "Finished Goods Store" }, store)}</select></label>
+        <label>Bin for passed stock<input name="pass_bin" value="${esc(b.Bin)}"></label>
+        ${b.serialized ? `
+        <label class="full">Rejected serials <span class="hint">required if any rejected</span><textarea name="reject_serials" data-serials rows="3"></textarea><span class="serial-count"></span></label>
+        <label class="full">Passed serials <span class="hint">leave blank if all remaining units passed</span><textarea name="pass_serials" data-serials rows="3"></textarea><span class="serial-count"></span></label>` : ""}
+        <label>Quarantine bin for rejected<input name="reject_bin" placeholder="QUARANTINE"></label>
+        <label>Remarks / QC report no.<input name="remarks"></label>
+        <div class="full"><div id="qcResult" class="result"></div>
+        <div class="modal-actions"><button type="button" class="btn secondary" onclick="closeModal()">Cancel</button><button class="btn" id="qcBtn">Save QC result</button></div></div>
+      </form>`);
+}
+async function saveQc(batchId) {
+    const body = { batch_id: batchId, ...formData(document.getElementById("qcForm")) };
+    const r = await submitWith(document.getElementById("qcBtn"), () => apiPost("/api/qc", body));
+    if (!r) return;
+    if (!r.success) return showResult(document.getElementById("qcResult"), r);
+    closeModal(); showToast(r.message); loadQc(); loadGrns();
+}
+
+/* ---------- GRN register ---------- */
+async function loadGrns() { GRNS = (await apiGet("/api/inwards?limit=300")).inwards || []; renderGrns(); }
+function renderGrns() {
+    const q = (document.getElementById("grnSearch").value || "").toLowerCase();
+    const rows = GRNS.filter(g => !q || [g["GRN No"], g.Supplier, g["Invoice No"], g["Bill of Entry No"], g["BL / AWB No"], g["Container No"], g["Kit For Item"]]
+        .some(x => String(x || "").toLowerCase().includes(q)));
+    document.getElementById("grnTable").innerHTML = table(["GRN", "Date", "Type", "Supplier / invoice", "BoE / BL", "Accepted", "Short", "Damaged", "Kit", "QC", ""],
+        rows.map(g => [`<b>${esc(g["GRN No"])}</b>${g.Status === "Reversed" ? "<br>" + statusPill("Reversed") : ""}`, fmtDate(g["GRN Date"]),
+            `<span class="type-tag">${esc(g["Inward Type"])}</span>`, `${esc(g.Supplier)}<br><span class="small muted">${esc(g["Invoice No"])}</span>`,
+            `<span class="small">${esc(g["Bill of Entry No"] || "—")}<br>${esc(g["BL / AWB No"] || "")}</span>`,
+            `<span class="num">${fmtQty(g["Total Accepted"])}</span>`, g["Total Short"] ? `<span class="diff-neg">${fmtQty(g["Total Short"])}</span>` : "0",
+            g["Total Damaged"] ? `<span class="diff-neg">${fmtQty(g["Total Damaged"])}</span>` : "0",
+            g["Kit Check"] ? statusPill(g["Kit Check"]) : "—", statusPill(g["QC Status"]),
+            `<button class="link-btn" onclick="showGrn('${esc(g["GRN No"])}')">Details</button>`]), "No GRNs yet.");
+}
+async function showGrn(no) {
+    const g = GRNS.find(x => x["GRN No"] === no);
+    const kv = ["Inward Type", "GRN Date", "Warehouse", "Supplier", "Country of Origin", "PO No", "Invoice No", "Invoice Date", "Currency", "Invoice Value",
+        "Exchange Rate", "BL / AWB No", "Container No", "Bill of Entry No", "BoE Date", "Port of Entry", "Vehicle No", "Gate Entry No", "Kit For Item",
+        "Kits Count", "Received By", "Status", "Remarks"].filter(k => g[k] !== "" && g[k] !== null);
+    openModal(no, `<div class="kv">${kv.map(k => `<div><b>${esc(k)}</b><span>${esc(g[k])}</span></div>`).join("")}</div>
+      ${table(["Item", "Invoice", "Received", "Short", "Damaged", "Accepted", "Zone / bin", "QC", "Price", "Serials"], g.lines.map(l => [
+        `${esc(l["Item Name"])}<br><span class="small muted">${esc(l["Item Code"])} · ${esc(l["Item Type"])}</span>`, fmtQty(l["Invoice Qty"]), fmtQty(l["Received Qty"]),
+        l["Short Qty"] ? `<span class="diff-neg">${fmtQty(l["Short Qty"])}</span>` : "0", l["Damaged Qty"] ? `<span class="diff-neg">${fmtQty(l["Damaged Qty"])}</span>` : "0",
+        `<b>${fmtQty(l["Accepted Qty"])}</b>`, `${zonePill(l.Zone)} ${esc(l.Bin)}`, statusPill(l["QC Status"]),
+        l["Unit Price"] ? `${fmtQty(l["Unit Price"])} ${esc(l.Currency)}` : "", l["Serial Count"] || ""]))}
+      <div id="grnKit"></div>`, true);
+    if (g["Kit For Item"]) {
+        const k = (await apiGet("/api/kit-check?grn=" + encodeURIComponent(no))).kit_check;
+        if (k) document.getElementById("grnKit").innerHTML = `<div class="kit-box"><div class="section-header"><h2>Kit check: ${esc(k.kit_item)} × ${esc(k.kits)}</h2>${statusPill(k.status)}</div>
+          ${table(["Component", "Required", "Received (good)", "Difference"], k.lines.map(l => [esc(l.item_name), fmtQty(l.required), fmtQty(l.received),
+            `<span class="${l.difference < 0 ? "diff-neg" : l.difference > 0 ? "diff-pos" : ""}">${fmtQty(l.difference)}</span>`]))}</div>`;
+    }
+}
+
+async function refresh() {
+    await Promise.all([loadQc(), loadGrns()]);
+    document.getElementById("supplierList").innerHTML = [...new Set(GRNS.map(g => g.Supplier).filter(Boolean))].map(s => `<option value="${esc(s)}">`).join("");
+}
+window.refresh = refresh;
+setup().then(() => { initTabs(document.getElementById("root")); refresh(); }).catch(e => showToast(e.message, "error"));
+</script>
+</body>
+</html>
