@@ -3,143 +3,283 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock & Reports | Panache Factory Inventory</title>
+    <title>Reports | Inventory Management System</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="main" id="root">
-    <div id="pageHeader"></div>
-    <div class="tabs">
-        <button data-tab="stock">Stock</button>
-        <button data-tab="serials">Serial trace</button>
-        <button data-tab="aging">Aging</button>
-        <button data-tab="txns">Transactions</button>
+    <div class="sidebar">
+        <div class="logo">📦 Inventory<span>MS</span></div>
+        <div class="menu">
+            <a href="dashboard.html">Dashboard</a>
+            <a href="assistant.html">AI Warehouse Assistant</a>
+            <a href="reports.html" class="active">Reports</a>
+        </div>
+        <div class="sidebar-footer">Data source: GitHub repo Excel file<br>File: inventory_data.xlsx</div>
     </div>
 
-    <div class="tab-panel section" id="stock">
-        <div class="section-header">
-            <div><h2>Stock by item</h2><p class="section-help"><b>Available</b> = Raw Store + Finished Goods. QC Hold, WIP and Quarantine are shown but can't be dispatched.</p></div>
-            <div class="btn-row">
-                <input id="stockSearch" placeholder="Search item…" style="max-width:220px" oninput="renderStock()">
-                <select id="stockType" style="max-width:160px" onchange="renderStock()"></select>
+    <div class="main">
+        <div class="header">
+            <h1>Reports</h1>
+            <div class="header-actions">
+                <a class="btn-action btn-log" href="dashboard.html" style="color:#fff;">＋ Log Stock</a>
+                <a class="btn-download" id="downloadBtn" href="#">⬇ Download Excel</a>
+                <div class="profile" id="profileName">—</div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
             </div>
         </div>
-        <div id="stockTable"></div>
-    </div>
 
-    <div class="tab-panel section" id="serials" hidden>
-        <div class="section-header">
-            <div><h2>Find a serial number</h2><p class="section-help">Type a serial, MAC or IMEI to see where it is, which GRN it came on, which work order built it, what parts went in, and who bought it.</p></div>
+        <div class="section">
+            <div class="section-header">
+                <h2>Current Stock by Product</h2>
+            </div>
+            <div id="productsTable"></div>
+            <p id="productsEmpty" style="display:none;" class="empty-note">No stock recorded yet.</p>
         </div>
-        <form class="btn-row" onsubmit="event.preventDefault(); doTrace()" style="margin-bottom:14px">
-            <input id="traceQ" placeholder="Serial / MAC / IMEI" style="max-width:320px">
-            <button class="btn">Trace</button>
-            <button type="button" class="btn secondary" onclick="listSerials()">List matching</button>
-        </form>
-        <div id="traceOut"></div>
+
+        <div class="section" id="qcSection" style="display:none;">
+            <div class="section-header">
+                <h2>Waiting for QC</h2>
+            </div>
+            <div id="qcTable"></div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Find a Serial Number</h2>
+            </div>
+            <form onsubmit="event.preventDefault(); traceSerial();" style="display:flex;gap:10px;margin-bottom:12px;">
+                <input id="serialQ" class="small-input" style="flex:1;max-width:360px;" placeholder="Serial / MAC / IMEI">
+                <button class="mini-btn" style="padding:8px 16px;">Search</button>
+            </form>
+            <div id="traceResult"></div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Aging Stock — 3+ Months In Warehouse</h2>
+            </div>
+            <div id="agingTable"></div>
+            <p id="agingEmpty" style="display:none;" class="empty-note">Nothing has been sitting too long. All clear.</p>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Recent Transactions</h2>
+            </div>
+            <div id="txTable"></div>
+            <p id="txEmpty" style="display:none;" class="empty-note">No transactions logged yet.</p>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Products &amp; Parts List (BOM)</h2>
+                <button class="mini-btn" onclick="openBom()">＋ Add parts list</button>
+            </div>
+            <p style="margin:-6px 0 12px;color:var(--ink-600);font-size:12.5px;">For models you assemble from SKD / CKD parts: list the parts needed for <b>one</b> unit. "Assemble" on the dashboard uses this to take parts out of stock.</p>
+            <div id="bomTable"></div>
+        </div>
     </div>
 
-    <div class="tab-panel section" id="aging" hidden>
-        <div class="section-header"><h2>Aging stock</h2>
-            <label class="small" style="display:flex;align-items:center;gap:6px;font-weight:600;color:var(--ink-600)">Older than <input id="agingDays" type="number" min="1" style="width:80px" onchange="loadAging()"> days</label></div>
-        <div id="agingTable"></div>
+    <div class="modal-backdrop" id="miniModal" onclick="if(event.target===this)closeMini()">
+      <div class="modal"><div class="modal-head"><div><h2 id="miniTitle"></h2><p id="miniSub"></p></div><button class="modal-close" onclick="closeMini()">×</button></div>
+        <div id="miniBody"></div>
+        <div id="miniError" class="form-error" style="display:none;"></div>
+        <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeMini()">Cancel</button><button class="btn-primary-inline" id="miniSave">Save</button></div>
+      </div>
     </div>
 
-    <div class="tab-panel section" id="txns" hidden>
-        <div class="section-header"><h2>Transaction log</h2>
-            <div class="btn-row"><input id="txItem" placeholder="Filter by item" style="max-width:200px" onchange="loadTx()">
-            <select id="txType" style="max-width:180px" onchange="loadTx()"></select></div></div>
-        <div id="txTable"></div>
-    </div>
-</div>
+    <script src="app.js"></script>
+    <script>
+        requireLogin();
+        document.getElementById("profileName").textContent = localStorage.getItem("userName");
 
-<script src="app.js"></script>
-<script>
-initPage("Stock & Reports", "Stock, serial traceability, aging and the full log.");
-let STOCK = [];
-const TX_TYPES = ["INWARD", "INWARD_DAMAGED", "QC_PASS", "QC_REJECT", "WO_CREATE", "WO_ISSUE", "WO_CONSUME", "WO_OUTPUT", "WO_RETURN", "WO_CLOSE",
-    "DISPATCH", "SAMPLE", "RTV", "SCRAP", "TRANSFER", "ADJUST_IN", "ADJUST_OUT", "SALES_RETURN", "UNDO"];
+        function esc(v) { return String(v ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
 
-async function setup() {
-    const m = await loadMeta();
-    document.getElementById("stockType").innerHTML = options(m.item_types, "", "All types");
-    document.getElementById("txType").innerHTML = options(TX_TYPES, "", "All types");
-    document.getElementById("agingDays").value = m.aging_days;
-}
-async function loadStock() { STOCK = (await apiGet("/api/stock")).stock || []; renderStock(); }
-function renderStock() {
-    const q = document.getElementById("stockSearch").value.toLowerCase(), t = document.getElementById("stockType").value;
-    const rows = STOCK.filter(e => (!t || e.item_type === t) && (!q || (e.item_name + " " + e.item_code).toLowerCase().includes(q)));
-    const z = (e, k) => e.by_zone[k] ? fmtQty(e.by_zone[k]) : '<span class="muted">·</span>';
-    document.getElementById("stockTable").innerHTML = table(["Item", "Type", '<span class="zone z-RAW_STORE">Raw</span>', '<span class="zone z-FG_STORE">FG</span>',
-        '<span class="zone z-QC_HOLD">QC</span>', '<span class="zone z-WIP">WIP</span>', '<span class="zone z-QUARANTINE">Quar.</span>', "Available", "Total", "Where"],
-        rows.map(e => [`<b>${esc(e.item_name)}</b><br><span class="small muted">${esc(e.item_code)}${e.serialized === "Y" ? " · serialized" : ""}</span>` +
-            (e.low_stock ? ` <span class="pill warn">below reorder ${e.reorder_level}</span>` : ""),
-            `<span class="type-tag">${esc(e.item_type)}</span>`, z(e, "RAW_STORE"), z(e, "FG_STORE"), z(e, "QC_HOLD"), z(e, "WIP"), z(e, "QUARANTINE"),
-            `<b>${fmtQty(e.available)}</b> ${esc(e.unit)}`, fmtQty(e.total),
-            `<span class="small">${e.locations.map(l => `${esc(l.location)}: <b>${fmtQty(l.quantity)}</b>`).join("<br>")}</span>`]), "No stock.");
-}
+        async function loadProducts() {
+            const data = await apiGet("/api/products");
+            const rows = data.products || [];
+            if (!rows.length) { document.getElementById("productsEmpty").style.display = "block"; return; }
+            document.getElementById("productsTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Product</th><th>Total Quantity</th><th>By Location</th><th>Serial Number(s)</th></tr></thead>
+                    <tbody>
+                        ${rows.map(p => `
+                            <tr>
+                                <td>${esc(p.product)}</td>
+                                <td>${fmtQty(p.total)} ${esc(p.unit || "")}</td>
+                                <td>${p.locations.map(l => `${esc(l.location)}: ${fmtQty(l.quantity)}${l.bins ? ` <span style="color:var(--ink-400)">(${esc(l.bins)})</span>` : ""}`).join("<br>")}</td>
+                                <td>${(p.serial_numbers || []).length ? p.serial_numbers.slice(0, 12).map(s => esc(s.serial_number)).join(", ") + (p.serial_numbers.length > 12 ? ` <i>+${p.serial_numbers.length - 12} more</i>` : "") : "—"}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
 
-async function doTrace() {
-    const q = document.getElementById("traceQ").value.trim();
-    if (!q) return;
-    const out = document.getElementById("traceOut");
-    out.innerHTML = '<span class="spinner"></span>';
-    const res = (await apiGet("/api/trace?serial=" + encodeURIComponent(q))).results || [];
-    if (!res.length) { out.innerHTML = `<p class="empty-note">No unit with serial / MAC "${esc(q)}". Try "List matching" for a partial search.</p>`; return; }
-    out.innerHTML = res.map(r => {
-        const s = r.serial, g = r.grn || {};
-        const kv = [["Item", `${s["Item Name"]} (${s["Item Code"]})`], ["Status", s.Status], ["Where", s.Status === "In Stock" ? `${s.Warehouse} / ${s.Zone} / ${s.Bin}` : ""],
-            ["MAC / IMEI", s["MAC / IMEI"]], ["Received", s["Received Date"]], ["GRN", s["GRN No"] ? `${s["GRN No"]} · ${s["Inward Type"]}` : ""],
-            ["Supplier / invoice", g.Supplier ? `${g.Supplier} · ${g["Invoice No"]}` : ""], ["Bill of Entry", g["Bill of Entry No"] || ""],
-            ["Work order", s["Work Order"]], ["Fitted in unit", s["Parent Serial"]], ["Customer", s.Customer], ["Dispatch", s["Dispatch Doc"] ? `${s["Dispatch Doc"]} on ${s["Dispatch Date"]}` : ""],
-            ["Warranty until", s["Warranty Until"]]].filter(x => x[1]);
-        return `<div class="trace-card"><div class="section-header"><h2 class="mono" style="font-size:16px">${esc(s["Serial No"])}</h2>${statusPill(s.Status)}</div>
-          <div class="kv">${kv.map(([k, v]) => `<div><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")}</div>
-          ${r.components_serials && r.components_serials.length ? `<div class="form-title">Serialised parts fitted in this unit</div>${table(["Part", "Serial", "GRN"], r.components_serials.map(c => [esc(c["Item Name"]), `<span class="mono">${esc(c["Serial No"])}</span>`, esc(c["GRN No"])]))}` : ""}
-          ${r.built_from && r.built_from.length ? `<div class="form-title">Built in ${esc(s["Work Order"])} from <span class="hint">(materials consumed in the same output run)</span></div>${table(["Component", "Qty", "GRN", "Supplier", "Part serials"], r.built_from.map(c => [esc(c.component), fmtQty(c.qty), esc(c.grn), esc(c.supplier), `<span class="mono small serial-wrap">${esc(c.serials)}</span>`]))}` : ""}
-          <div class="form-title">History</div>
-          ${table(["When", "Type", "Ref", "From", "To", "Party", "By", "Status"], r.history.map(h => [fmtDate(h.Timestamp), `<span class="type-tag">${esc(h["Txn Type"])}</span>`, esc(h["Ref No"]),
-              `${esc(h["From Warehouse"])} ${h["From Zone"] ? zonePill(h["From Zone"]) : ""}`, `${esc(h["To Warehouse"])} ${h["To Zone"] ? zonePill(h["To Zone"]) : ""} ${esc(h.Bin)}`,
-              esc(h.Party), esc(h["Entered By"]), statusPill(h.Status)]), "No movements logged.")}</div>`;
-    }).join("");
-}
-async function listSerials() {
-    const q = document.getElementById("traceQ").value.trim();
-    const r = await apiGet("/api/serials?q=" + encodeURIComponent(q));
-    document.getElementById("traceOut").innerHTML = `<p class="small muted">${r.total} match(es)${r.total > r.serials.length ? `, showing the latest ${r.serials.length}` : ""}.</p>` +
-        table(["Serial", "Item", "MAC / IMEI", "Status", "Where", "GRN", "WO", "Customer"], r.serials.map(s => [
-            `<button class="link-btn mono" onclick="document.getElementById('traceQ').value=this.textContent; doTrace()">${esc(s["Serial No"])}</button>`, esc(s["Item Name"]),
-            `<span class="mono">${esc(s["MAC / IMEI"])}</span>`, statusPill(s.Status), s.Status === "In Stock" ? `${esc(s.Warehouse)} ${zonePill(s.Zone)} ${esc(s.Bin)}` : "",
-            esc(s["GRN No"]), esc(s["Work Order"]), esc(s.Customer)]), "No serials found.");
-}
+        /* ---- QC ---- */
+        let QC = [];
+        async function loadQc() {
+            QC = (await apiGet("/api/pending-qc")).batches || [];
+            document.getElementById("qcSection").style.display = QC.length ? "block" : "none";
+            document.getElementById("qcTable").innerHTML = `<table class="data-table">
+                <thead><tr><th>Product</th><th>From</th><th>Warehouse</th><th>Storage</th><th>Qty Waiting</th><th></th></tr></thead>
+                <tbody>${QC.map((b, i) => `<tr><td>${esc(b["Item Name"])}</td><td>${esc(b["GRN No"] || b["Work Order"])}</td><td>${esc(b.Warehouse)}</td>
+                  <td>${esc(b.Bin)}</td><td>${fmtQty(b["Qty Remaining"])} ${esc(b.Unit)}</td>
+                  <td><button class="mini-btn" onclick="openQc(${i})">Record QC</button></td></tr>`).join("")}</tbody></table>`;
+        }
+        function openQc(i) {
+            const b = QC[i];
+            openMini(`QC: ${b["Item Name"]}`, `${fmtQty(b["Qty Remaining"])} ${b.Unit} waiting (${b["GRN No"] || b["Work Order"]}).`, `
+              <form class="form-grid" id="miniForm">
+                <label>Passed qty<input name="pass_qty" type="number" min="0" step="any" value="${b["Qty Remaining"]}"></label>
+                <label>Rejected qty<input name="reject_qty" type="number" min="0" step="any" value="0"></label>
+                ${b.serialized ? `<label class="wide">Rejected serial numbers<textarea name="reject_serials" rows="2" placeholder="Only if some were rejected"></textarea></label>` : ""}
+                <label class="wide">Remarks<input name="remarks"></label>
+              </form>
+              <div class="form-note">Passed stock becomes usable. Rejected stock is moved to Quarantine.</div>`,
+              async () => {
+                const body = Object.fromEntries(new FormData(document.getElementById("miniForm")).entries());
+                return apiPost("/api/qc", { batch_id: b["Batch ID"], entered_by: localStorage.getItem("userName"), ...body });
+              });
+        }
 
-async function loadAging() {
-    const days = document.getElementById("agingDays").value;
-    const d = await apiGet("/api/aging-report?threshold_days=" + encodeURIComponent(days));
-    document.getElementById("agingTable").innerHTML = table(["Item", "Where", "Qty", "Received", "Age", "GRN / source", "Inward type"],
-        d.batches.map(b => [esc(b["Item Name"]), `${esc(b.Warehouse)} ${zonePill(b.Zone)} ${esc(b.Bin)}`, `${fmtQty(b["Qty Remaining"])} ${esc(b.Unit)}`,
-            fmtDate(b["Date Received"]), agingPill(b["Age Days"], d.threshold_days), esc(b["GRN No"] || b["Work Order"] || b.Source), esc(b["Inward Type"])]),
-        `Nothing older than ${d.threshold_days} days.`);
-}
-async function loadTx() {
-    const t = document.getElementById("txType").value, i = document.getElementById("txItem").value.trim();
-    const d = await apiGet(`/api/transactions?limit=300&type=${encodeURIComponent(t)}&item=${encodeURIComponent(i)}`);
-    document.getElementById("txTable").innerHTML = table(["When", "Txn", "Type", "Item", "Qty", "From", "To", "Ref / party", "Serials", "By", "Status"],
-        d.transactions.map(r => [`<span class="small">${fmtDate(r.Timestamp)}</span>`, `<span class="mono small">${esc(r["Txn ID"])}</span>`, `<span class="type-tag">${esc(r["Txn Type"])}</span>`,
-            esc(r["Item Name"]), r.Qty !== "" ? `${fmtQty(r.Qty)} ${esc(r.Unit)}` : "", `${esc(r["From Warehouse"])} ${r["From Zone"] ? zonePill(r["From Zone"]) : ""}`,
-            `${esc(r["To Warehouse"])} ${r["To Zone"] ? zonePill(r["To Zone"]) : ""} ${esc(r.Bin)}`, `${esc(r["Ref No"])}${r.Party ? "<br>" + esc(r.Party) : ""}`,
-            `<span class="mono small serial-wrap">${esc(String(r.Serials || "").slice(0, 120))}${String(r.Serials || "").length > 120 ? "…" : ""}</span>`,
-            esc(r["Entered By"]), statusPill(r.Status)]), "No transactions.");
-}
-const loaded = {};
-window.onTab = tab => {
-    if (loaded[tab]) return;
-    loaded[tab] = true;
-    ({ stock: loadStock, aging: loadAging, txns: loadTx, serials: () => {} })[tab]();
-};
-window.refresh = () => { Object.keys(loaded).forEach(k => delete loaded[k]); const a = document.querySelector(".tabs button.active"); if (a) window.onTab(a.dataset.tab); };
-setup().then(() => initTabs(document.getElementById("root"))).catch(e => showToast(e.message, "error"));
-</script>
+        /* ---- serial trace ---- */
+        async function traceSerial() {
+            const q = document.getElementById("serialQ").value.trim();
+            if (!q) return;
+            const res = (await apiGet("/api/trace?serial=" + encodeURIComponent(q))).results || [];
+            const out = document.getElementById("traceResult");
+            if (!res.length) { out.innerHTML = `<p class="empty-note">No unit found with serial "${esc(q)}".</p>`; return; }
+            out.innerHTML = res.map(r => {
+                const s = r.serial, g = r.grn || {};
+                const rows = [["Product", s["Item Name"]], ["Status", s.Status],
+                    ["Where", s.Status === "In Stock" ? `${s.Warehouse} · ${s.Bin}` : ""], ["MAC / IMEI", s["MAC / IMEI"]],
+                    ["Received", s["GRN No"] ? `${s["Received Date"]} · ${s["Inward Type"]} · ${g.Supplier || ""} ${g["Invoice No"] ? "(inv " + g["Invoice No"] + ")" : ""}` : s["Received Date"]],
+                    ["Bill of Entry", g["Bill of Entry No"]], ["Assembled in", s["Work Order"]], ["Fitted inside unit", s["Parent Serial"]],
+                    ["Parts inside", (r.components_serials || []).map(c => `${c["Item Name"]} ${c["Serial No"]}`).join(", ")],
+                    ["Sold to", s.Customer ? [s.Customer, s["Dispatch Doc"], s["Dispatch Date"]].filter(Boolean).join(" · ") : ""], ["Warranty until", s["Warranty Until"]]]
+                    .filter(x => x[1]);
+                return `<table class="data-table" style="margin-bottom:10px;"><thead><tr><th colspan="2">${esc(s["Serial No"])}</th></tr></thead>
+                    <tbody>${rows.map(([k, v]) => `<tr><td style="width:180px;color:var(--ink-600)">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</tbody></table>`;
+            }).join("");
+        }
+
+        /* ---- BOM ---- */
+        let BOMS = [];
+        async function loadBoms() {
+            BOMS = (await apiGet("/api/bom")).boms || [];
+            document.getElementById("bomTable").innerHTML = BOMS.length ? `<table class="data-table">
+                <thead><tr><th>Model</th><th>Parts for one unit</th><th></th></tr></thead>
+                <tbody>${BOMS.map((b, i) => `<tr><td>${esc(b.fg_item_name)}</td>
+                  <td>${b.lines.map(l => `${esc(l["Component Name"])} × ${fmtQty(l["Qty Per Unit"])}`).join(", ")}</td>
+                  <td><button class="mini-btn light" onclick="openBom(${i})">Edit</button></td></tr>`).join("")}</tbody></table>`
+                : '<p class="empty-note">No parts lists yet.</p>';
+        }
+        function openBom(i) {
+            const b = i === undefined ? null : BOMS[i];
+            const text = b ? b.lines.map(l => `${l["Component Name"]}, ${l["Qty Per Unit"]}`).join("\n") : "";
+            openMini(b ? `Parts list: ${b.fg_item_name}` : "New parts list", "One part per line: part name, quantity per unit.", `
+              <form class="form-grid" id="miniForm">
+                <label class="wide">Model<input name="fg_item" list="productOptions" value="${esc(b ? b.fg_item_name : "")}" ${b ? "readonly" : ""} placeholder="e.g. Panache 43in Smart TV"></label>
+                <label class="wide">Parts for ONE unit<textarea name="parts" rows="8" placeholder="Main Board 43, 1&#10;Panel 43, 1&#10;Back Cover 43, 1&#10;Screw M3, 12">${esc(text)}</textarea></label>
+                ${b ? "" : `<label class="wide" style="flex-direction:row;align-items:center;gap:8px;"><input type="checkbox" name="fg_serialized" checked style="width:auto"> Each assembled unit gets its own serial number</label>`}
+              </form><datalist id="productOptions"></datalist>`,
+              async () => {
+                const f = document.getElementById("miniForm");
+                const components = f.parts.value.split(/\n/).map(l => l.trim()).filter(Boolean).map(l => {
+                    const m = l.split(/,|\t/); return { item: m[0].trim(), qty_per_unit: (m[1] || "1").trim() };
+                });
+                return apiPost("/api/bom", { fg_item: f.fg_item.value.trim(), components, fg_serialized: f.fg_serialized ? f.fg_serialized.checked : null,
+                                             entered_by: localStorage.getItem("userName") });
+              });
+            apiGet("/api/product-master").then(d => {
+                const dl = document.getElementById("productOptions");
+                if (dl) dl.innerHTML = (d.products || []).map(p => `<option value="${esc(p.name)}"></option>`).join("");
+            });
+        }
+
+        /* ---- small modal ---- */
+        let _miniSave = null;
+        function openMini(title, sub, html, onSave) {
+            document.getElementById("miniTitle").textContent = title;
+            document.getElementById("miniSub").textContent = sub;
+            document.getElementById("miniBody").innerHTML = html;
+            document.getElementById("miniError").style.display = "none";
+            _miniSave = onSave;
+            document.getElementById("miniModal").classList.add("open");
+        }
+        function closeMini() { document.getElementById("miniModal").classList.remove("open"); }
+        document.getElementById("miniSave").addEventListener("click", async () => {
+            const btn = document.getElementById("miniSave"), err = document.getElementById("miniError");
+            btn.disabled = true; btn.textContent = "Saving…"; err.style.display = "none";
+            try {
+                const r = await _miniSave();
+                if (!r.success) throw new Error(r.message || "Could not save.");
+                closeMini(); showToast(r.message || "Saved.");
+                await Promise.all([loadProducts(), loadQc(), loadBoms(), loadTransactions()]);
+            } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+            finally { btn.disabled = false; btn.textContent = "Save"; }
+        });
+
+        async function loadAging() {
+            const data = await apiGet("/api/aging-report");
+            const rows = data.batches || [];
+            if (!rows.length) { document.getElementById("agingEmpty").style.display = "block"; return; }
+            document.getElementById("agingTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>Product</th><th>Warehouse</th><th>Exact Storage</th><th>Qty</th><th>Date Received</th><th>Age</th></tr></thead>
+                    <tbody>
+                        ${rows.map(r => `
+                            <tr>
+                                <td>${r.Product}</td>
+                                <td>${r.Location}</td>
+                                <td>${r["Storage Location"] || "—"}</td>
+                                <td>${fmtQty(r["Qty Remaining"])} ${r.Unit || ""}</td>
+                                <td>${r["Date Received"]}</td>
+                                <td>${agingPill(r["Age Days"], data.threshold_days)}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        async function loadTransactions() {
+            const data = await apiGet("/api/transactions?limit=50");
+            const rows = data.transactions || [];
+            if (!rows.length) { document.getElementById("txEmpty").style.display = "block"; return; }
+            document.getElementById("txTable").innerHTML = `
+                <table class="data-table">
+                    <thead><tr><th>When</th><th>Action</th><th>Product</th><th>From</th><th>To</th><th>Qty</th><th>By</th><th>Status</th></tr></thead>
+                    <tbody>
+                        ${rows.map(t => `
+                            <tr>
+                                <td>${new Date(t.Timestamp).toLocaleString()}</td>
+                                <td>${t.Action}</td>
+                                <td>${esc(t.Product || "")}</td>
+                                <td>${t["From Location"] || "—"}</td>
+                                <td>${t["To Location"] || "—"}</td>
+                                <td>${t.Quantity != null ? fmtQty(t.Quantity) + " " + (t.Unit || "") : "—"}</td>
+                                <td>${t["Entered By"] || ""}</td>
+                                <td>${t.Status}</td>
+                            </tr>
+                        `).join("")}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        (async () => {
+            try {
+                await apiGet("/api/download-url");
+                document.getElementById("downloadBtn").href = API_BASE + "/api/download";
+            } catch (e) { /* ignore */ }
+            await loadProducts();
+            await loadQc();
+            await loadAging();
+            await loadTransactions();
+            await loadBoms();
+        })();
+    </script>
 </body>
 </html>
