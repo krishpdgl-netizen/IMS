@@ -23,6 +23,7 @@
             <h1>Inventory Dashboard</h1>
             <div class="header-actions">
                 <button class="btn-action btn-log" onclick="openLogModal()">＋ Log Stock</button>
+                <button class="btn-action btn-scan" onclick="openImportModal()">⬆ Import Data</button>
                 <a class="btn-action btn-demo"
                    href="https://demotracker-blond.vercel.app/">
                     Sample/Demo Unit Log
@@ -66,6 +67,7 @@
             <div class="action-grid">
                 <button class="action-tile" onclick="openLogModal()"><span>＋</span><b>Log Stock Movement</b><small>Stock in (CBU / SKD / CKD), stock out, transfer, adjust or assemble</small></button>
                 <button class="action-tile" onclick="document.getElementById('documentInput').click()"><span>⌕</span><b>Scan a Bill / Challan</b><small>Upload a PDF or photo and let AI read it</small></button>
+                <button class="action-tile" onclick="openImportModal()"><span>⬆</span><b>Import from Excel / CSV</b><small>Load opening stock or a product list in one go</small></button>
                 <a class="action-tile" href="assistant.html"><span>✦</span><b>Ask the AI Assistant</b><small>Type what happened in plain English</small></a>
                 <a class="action-tile" href="reports.html"><span>▤</span><b>Open Reports</b><small>See stock, aging and transaction history</small></a>
             </div>
@@ -162,6 +164,9 @@
               </div>
             </div>
             <label data-for="DISPATCH" class="wide">Delivery address<input name="delivery_address" placeholder="Address printed on the document"></label>
+            <label data-for="RECEIVE,DISPATCH,TRANSFER">Transporter name<input name="transporter_name" list="transporterOptions" placeholder="e.g. Blue Dart, VRL, Gati"></label>
+            <label data-for="RECEIVE,DISPATCH,TRANSFER">Docket / LR no.<input name="docket_no" placeholder="Docket or LR number"></label>
+            <datalist id="transporterOptions"></datalist>
             <details data-for="RECEIVE" class="wide more-details">
               <summary>Import &amp; extra details (optional)</summary>
               <div class="form-grid" style="margin-top:10px;">
@@ -184,6 +189,35 @@
           <div id="logError" class="form-error"></div>
           <div class="modal-actions"><button type="button" class="btn-secondary" onclick="closeLogModal()">Cancel</button><button class="btn-primary-inline" id="saveLogBtn">Save to Inventory</button></div>
         </form>
+      </div>
+    </div>
+
+    <!-- Import modal -->
+    <div class="modal-backdrop" id="importModal" onclick="if(event.target===this)closeImportModal()">
+      <div class="modal">
+        <div class="modal-head"><div><h2>Import Data</h2><p>Upload an Excel or CSV file. The whole file is checked first and nothing is saved until you confirm.</p></div><button class="modal-close" onclick="closeImportModal()">×</button></div>
+        <div class="form-grid">
+          <label class="wide">What are you importing?
+            <select id="importKind" onchange="importKindChanged()">
+              <option value="stock">Stock — opening stock / bulk Stock In</option>
+              <option value="items">Product list — Item Master</option>
+            </select></label>
+          <label data-imp="stock">Default warehouse <small style="font-weight:500">(used when a row has none)</small>
+            <select id="importWh" onchange="importReset()"><option value="">— none —</option></select></label>
+          <label data-imp="stock">Default inward type <small style="font-weight:500">(used when a row has none)</small>
+            <select id="importType" onchange="importReset()"><option value="">LOCAL</option><option>CBU</option><option>SKD</option><option>CKD</option></select></label>
+          <label class="wide">File (.xlsx or .csv)
+            <input type="file" id="importFile" accept=".xlsx,.xlsm,.csv,.txt,.tsv" onchange="importReset()"></label>
+        </div>
+        <p style="margin:12px 0 0;font-size:12.5px;color:var(--ink-600);">
+          <a id="importTemplateLink" href="#" style="color:#0f766e;font-weight:700;">⬇ Download the template</a>
+          — it lists every column and explains how to fill it. Your own column names also work if they are close (Qty, Vendor, LR No…).</p>
+        <div id="importResult" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;font-size:13px;white-space:pre-wrap;line-height:1.5;"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" onclick="closeImportModal()">Cancel</button>
+          <button type="button" class="btn-secondary" id="importCheckBtn" onclick="runImport('preview')">Check file</button>
+          <button type="button" class="btn-primary-inline" id="importCommitBtn" style="display:none;" onclick="runImport('commit')">Import now</button>
+        </div>
       </div>
     </div>
 
@@ -360,8 +394,19 @@
             }
         }
 
+        let transportersLoaded = false;
+        async function loadTransporters(force = false) {
+            if (transportersLoaded && !force) return;
+            try {
+                const data = await apiGet("/api/transporters");
+                document.getElementById("transporterOptions").innerHTML = (data.transporters || []).map(n => `<option value="${esc(n)}"></option>`).join("");
+                transportersLoaded = true;
+            } catch (e) { console.warn("Could not load transporter list:", e); }
+        }
+
         function openLogModal() {
             loadProductMaster();
+            loadTransporters();
             const modal = document.getElementById("logModal");
             const picker = document.getElementById("movementTypePicker");
             const form = document.getElementById("logForm");
@@ -482,6 +527,7 @@
                 document.getElementById("kitRows").innerHTML = ""; kitCount();
                 productMasterLoaded = false;
                 await loadProductMaster(true);
+                loadTransporters(true);
                 showToast(data.message || "Inventory updated successfully.");
                 await loadCards(); await loadLocationChart(); await loadAgingList();
             } catch (err) { document.getElementById("logError").textContent = err.message; }
@@ -522,6 +568,8 @@
               <div><b>Party</b><span>${esc(d.party_name || "—")}</span></div>
               <div><b>Delivery address</b><span>${esc(d.delivery_address || "—")}</span></div>
               <div><b>Date</b><span>${esc(d.document_date || "—")}</span></div>
+              <div><b>Transporter name</b><input id="scanTransporter" value="${esc(d.transporter_name || "")}" list="transporterOptions" style="width:100%;margin-top:4px;padding:6px;border:1px solid #d1d5db;border-radius:6px;"></div>
+              <div><b>Docket / LR no.</b><input id="scanDocket" value="${esc(d.docket_no || "")}" style="width:100%;margin-top:4px;padding:6px;border:1px solid #d1d5db;border-radius:6px;"></div>
               <div><b>Inward type (for stock coming in)</b><select id="scanInwardType" style="width:100%;margin-top:4px;padding:6px;border:1px solid #d1d5db;border-radius:6px;">
                 ${["CBU","SKD","CKD","LOCAL"].map(x=>`<option ${x===(d.suggested_inward_type||"LOCAL")?"selected":""}>${x}</option>`).join("")}</select></div>
               <div><b>QC status</b><select id="scanQc" style="width:100%;margin-top:4px;padding:6px;border:1px solid #d1d5db;border-radius:6px;">
@@ -559,6 +607,7 @@
               inward_type:document.getElementById("scanInwardType").value,qc_status:document.getElementById("scanQc").value,
               bill_of_entry_no:d.bill_of_entry_no||"",bl_awb_no:d.bl_awb_no||"",container_no:d.container_no||"",
               country_of_origin:d.country_of_origin||"",currency:d.currency||"",
+              transporter_name:document.getElementById("scanTransporter").value.trim(),docket_no:document.getElementById("scanDocket").value.trim(),
               entered_by:localStorage.getItem("userName")||"Dashboard User",source_document:d._filename||""};
             try {
               const res=await fetch(API_BASE+"/api/log-document",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -570,6 +619,75 @@
             finally{btn.disabled=false;btn.textContent="Confirm & Save All";}
         }
         function closeScanModal(){document.getElementById("scanModal").classList.remove("open");}
+
+        /* ---------- Data import ---------- */
+        async function openImportModal() {
+            document.getElementById("importModal").classList.add("open");
+            document.getElementById("importFile").value = "";
+            importKindChanged();
+            loadTransporters();
+            const sel = document.getElementById("importWh");
+            if (sel.options.length <= 1) {
+                try {
+                    const m = await apiGet("/api/meta");
+                    (m.warehouses || []).forEach(w => sel.insertAdjacentHTML("beforeend", `<option value="${esc(w)}">${esc(w)}</option>`));
+                } catch (e) { console.warn("Could not load warehouses:", e); }
+            }
+        }
+        function closeImportModal() { document.getElementById("importModal").classList.remove("open"); }
+        function importKindChanged() {
+            const kind = document.getElementById("importKind").value;
+            document.querySelectorAll("#importModal [data-imp]").forEach(el => el.classList.toggle("hidden-field", el.dataset.imp !== kind));
+            document.getElementById("importTemplateLink").href = API_BASE + "/api/import-template?kind=" + kind;
+            importReset();
+        }
+        function importReset() {
+            document.getElementById("importResult").style.display = "none";
+            document.getElementById("importCommitBtn").style.display = "none";
+        }
+        function importShow(ok, text) {
+            const el = document.getElementById("importResult");
+            el.style.display = "block";
+            el.style.background = ok ? "#e6f5f3" : "#fee2e2";
+            el.style.color = ok ? "#0b3b3c" : "#991b1b";
+            el.textContent = text;
+        }
+        async function runImport(mode) {
+            const file = document.getElementById("importFile").files[0];
+            if (!file) return importShow(false, "Choose an Excel or CSV file first.");
+            const checkBtn = document.getElementById("importCheckBtn"), goBtn = document.getElementById("importCommitBtn");
+            const fd = new FormData();
+            fd.append("file", file);
+            fd.append("kind", document.getElementById("importKind").value);
+            fd.append("mode", mode);
+            fd.append("default_warehouse", document.getElementById("importWh").value);
+            fd.append("default_inward_type", document.getElementById("importType").value);
+            fd.append("entered_by", localStorage.getItem("userName") || "Dashboard User");
+            checkBtn.disabled = goBtn.disabled = true;
+            goBtn.textContent = mode === "commit" ? "Importing…" : "Import now";
+            importShow(true, mode === "commit" ? "Importing…" : "Checking the file…");
+            try {
+                const res = await fetch(API_BASE + "/api/import-data", { method: "POST", body: fd });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || "Import failed.");
+                if (!data.success) { goBtn.style.display = "none"; return importShow(false, data.message || "The file could not be imported."); }
+                let note = "";
+                if ((data.warnings || []).length) note += "\n\nNote: " + data.warnings.join(" ");
+                if ((data.ignored_columns || []).length) note += "\n\nColumns not recognised and ignored: " + data.ignored_columns.join(", ");
+                if (mode === "preview") {
+                    importShow(true, "✓ File is OK — " + data.message + "\nNothing has been saved yet. Click “Import now” to save it." + note);
+                    goBtn.style.display = "inline-flex";
+                } else {
+                    closeImportModal();
+                    showToast("Imported: " + data.message);
+                    productMasterLoaded = false; loadProductMaster(true); loadTransporters(true);
+                    await loadCards(); await loadLocationChart(); await loadAgingList();
+                }
+            } catch (err) {
+                goBtn.style.display = "none";
+                importShow(false, err.message);
+            } finally { checkBtn.disabled = goBtn.disabled = false; }
+        }
         function showToast(message) {
           const t=document.createElement("div"); t.className="toast"; t.textContent="✓ "+message; document.body.appendChild(t);
           setTimeout(()=>t.remove(),3500);
