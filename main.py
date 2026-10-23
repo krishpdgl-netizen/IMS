@@ -126,6 +126,7 @@ INWARD_EDITABLE = {"party": "Supplier", "doc_no": "Invoice No", "invoice_date": 
 # ---- Sheet layout -------------------------------------------------------------
 ITEMS, BOM, INWARDS, LINES, BATCHES, SERIALS = "Items", "BOM", "Inwards", "Inward Lines", "Batches", "Serials"
 WOS, CONS, LOG, META, JOURNAL = "Work Orders", "Consumption", "Transaction Log", "_Meta", "_Journal"
+IMPORTS = "Import Archive"
 
 SCHEMA = {
     ITEMS: ("Item Code", ["Item Code", "Item Name", "Normalized Name", "Item Type", "Category", "Model",
@@ -160,10 +161,12 @@ SCHEMA = {
                      "Unit", "From Warehouse", "From Zone", "To Warehouse", "To Zone", "Bin", "Serials",
                      "Party", "Doc No", "Transporter Name", "Docket No", "Entered By", "Status", "Message", "Remarks",
                      "Last Edited By", "Last Edited At"]),
+    IMPORTS: ("Archive ID", ["Archive ID", "Import ID", "File", "Sheet", "Row", "Status", "Reason", "Result Ref",
+                             "Raw Data", "Mapping", "Stored Copy", "Imported By", "Imported At"]),
     META: ("Key", ["Key", "Value"]),
     JOURNAL: ("Seq", ["Seq", "Txn ID", "Op", "Sheet", "Row Key", "Column", "Old Value"]),
 }
-SHEET_ORDER = [ITEMS, BOM, INWARDS, LINES, BATCHES, SERIALS, WOS, CONS, LOG, META, JOURNAL]
+SHEET_ORDER = [ITEMS, BOM, INWARDS, LINES, BATCHES, SERIALS, WOS, CONS, LOG, IMPORTS, META, JOURNAL]
 # Rows appended by a transaction in these sheets are kept (status -> Reversed) on undo, for audit.
 UNDO_KEEP = {LOG: "Status", INWARDS: "Status", WOS: "Status"}
 JOURNAL_KEEP_TXNS = 100
@@ -352,6 +355,12 @@ class GitHubStore:
     def download_url(self):
         return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{EXCEL_PATH}"
 
+    def save_file(self, path: str, raw: bytes, message: str):
+        """Stores an extra file (e.g. the original import upload) next to the workbook."""
+        r = requests.put(f"{self.API}/repos/{GITHUB_REPO}/contents/{path}", headers=self._headers(), timeout=60,
+                         json={"message": message, "content": base64.b64encode(raw).decode(), "branch": GITHUB_BRANCH})
+        r.raise_for_status()
+
 
 class LocalStore:
     def __init__(self, path):
@@ -374,6 +383,12 @@ class LocalStore:
 
     def download_url(self):
         return ""
+
+    def save_file(self, path: str, raw: bytes, message: str):
+        full = os.path.join(os.path.dirname(os.path.abspath(self.path)), os.path.relpath(path, os.path.dirname(EXCEL_PATH) or "."))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(raw)
 
 
 STORE = LocalStore(LOCAL_XLSX) if LOCAL_XLSX else GitHubStore()
@@ -1724,7 +1739,7 @@ class Book:
     # ======================================================================
     # DATA IMPORT (Excel / CSV)
     # ======================================================================
-    def import_stock(self, rows: List[tuple], default_wh="", default_type="") -> dict:
+    def import_stock(self, rows: List[tuple], default_wh="", default_type="", source_doc="") -> dict:
         errors: List[str] = []
         groups: Dict[tuple, dict] = {}
         for rn, r in rows:
@@ -1762,7 +1777,9 @@ class Book:
                 "qc_status": qc, "transporter_name": trn, "docket_no": dkt, "invoice_date": s(r.get("invoice_date")),
                 "po_no": s(r.get("po_no")), "currency": s(r.get("currency")), "country_of_origin": s(r.get("country_of_origin")),
                 "bill_of_entry_no": s(r.get("bill_of_entry_no")), "bl_awb_no": s(r.get("bl_awb_no")),
-                "container_no": s(r.get("container_no"))}, "lines": {}, "rows": []})
+                "container_no": s(r.get("container_no")), "boe_date": s(r.get("boe_date")),
+                "port_of_entry": s(r.get("port_of_entry")), "vehicle_no": s(r.get("vehicle_no")),
+                "gate_entry_no": s(r.get("gate_entry_no")), "source_document": source_doc}, "lines": {}, "rows": []})
             g["rows"].append(rn)
             lk = (norm(s(r.get("item_code")) or product), norm(r.get("bin")), s(r.get("unit_price")), norm(r.get("lot_no")))
             ln = g["lines"].get(lk)
@@ -1771,18 +1788,22 @@ class Book:
                 g["lines"][lk] = {"item": product, "item_code": s(r.get("item_code")), "invoice_qty": inv_q, "received_qty": qty,
                                   "damaged_qty": num(r.get("damaged_qty"), 0), "bin": s(r.get("bin")), "serials": s(sers_raw),
                                   "unit": s(r.get("unit")), "unit_price": s(r.get("unit_price")), "item_type": s(r.get("item_type")),
-                                  "hsn_code": s(r.get("hsn_code")), "lot_no": s(r.get("lot_no")), "remarks": s(r.get("remarks"))}
+                                  "hsn_code": s(r.get("hsn_code")), "lot_no": s(r.get("lot_no")), "mfg_date": s(r.get("mfg_date")),
+                                  "remarks": s(r.get("remarks"))}
             else:       # same product + bin on another row (e.g. one row per serial) -> merge into one line
                 ln["invoice_qty"] += inv_q
                 ln["received_qty"] += qty
                 ln["damaged_qty"] += num(r.get("damaged_qty"), 0)
                 if s(sers_raw):
                     ln["serials"] = (ln["serials"] + "\n" + s(sers_raw)).strip()
+                rm = s(r.get("remarks"))
+                if rm and rm not in ln["remarks"].split(" || "):      # keep every row's remarks, no repeats
+                    ln["remarks"] = (ln["remarks"] + " || " + rm) if ln["remarks"] else rm
 
         def span(rs):
             return f"Row {rs[0]}" if len(rs) == 1 else (f"Rows {', '.join(map(str, rs))}" if len(rs) <= 4 else f"Rows {min(rs)}-{max(rs)}")
 
-        grns, n_rows, no_inv = [], 0, 0
+        grns, n_rows, no_inv, refs = [], 0, 0, {}
         for g in groups.values():
             body = {**g["hdr"], "lines": list(g["lines"].values())}
             if not g["hdr"]["invoice_no"]:
@@ -1791,6 +1812,8 @@ class Book:
                 res = self.inward(body)
                 grns.append(res["grn_no"])
                 n_rows += len(g["rows"])
+                for rn in g["rows"]:
+                    refs[rn] = res["grn_no"]
             except ValueError as e:
                 who = g["hdr"]["supplier"] + (f" / inv {g['hdr']['invoice_no']}" if g["hdr"]["invoice_no"] else "")
                 errors.append(f"{span(g['rows'])} ({who}): {e}")
@@ -1800,26 +1823,65 @@ class Book:
         if no_inv:
             self.warnings.append(f"{no_inv} group(s) have no invoice number, so importing the same file twice cannot be detected.")
         shown = ", ".join(grns[:6]) + (" ..." if len(grns) > 6 else "")
-        return {"message": f"{n_rows} row(s) -> {len(grns)} GRN(s) ({shown}).", "rows": n_rows, "grns": grns}
+        return {"message": f"{n_rows} row(s) -> {len(grns)} GRN(s) ({shown}).", "rows": n_rows, "grns": grns, "row_refs": refs}
 
     def import_items(self, rows: List[tuple]) -> dict:
-        added, skipped, errors = [], [], []
+        added, filled, unchanged, errors, refs = [], [], [], [], {}
+        fill_cols = {"category": "Category", "model": "Model", "variant": "Variant", "unit": "Unit", "hsn_code": "HSN Code",
+                     "warranty_months": "Warranty Months", "reorder_level": "Reorder Level", "remarks": "Remarks"}
         for rn, r in rows:
             name = s(r.get("item_name"))
             if not name:
                 errors.append(f"Row {rn}: item name is missing")
                 continue
-            if self.find_item(name) or (s(r.get("item_code")) and self.find_item(r.get("item_code"))):
-                skipped.append(name)
+            ex = self.find_item(name) or (self.find_item(r.get("item_code")) if s(r.get("item_code")) else None)
+            if ex:
+                # already in the master: fill in details that are still blank there (never overwrite)
+                ch = {}
+                for k, col in fill_cols.items():
+                    v = s(r.get(k))
+                    if v and s(ex.get(col)) in ("", "0"):
+                        ch[col] = num(v, 0) if k in ("warranty_months", "reorder_level") else v
+                if ch:
+                    self.t[ITEMS].update(ex["Item Code"], ch)
+                    filled.append(ex["Item Name"])
+                else:
+                    unchanged.append(ex["Item Name"])
+                refs[rn] = ex["Item Code"]
                 continue
             try:
-                added.append(self.create_item({**r, "item_type": s(r.get("item_type")) or "PART"})["Item Code"])
+                for k in ("warranty_months", "reorder_level"):
+                    num(r.get(k), 0)
+                rec = self.create_item({**r, "item_type": s(r.get("item_type")) or "PART"})
+                added.append(rec["Item Code"])
+                refs[rn] = rec["Item Code"]
             except ValueError as e:
                 errors.append(f"Row {rn}: {e}")
         if errors:
             raise ValueError(f"Nothing was imported - {len(errors)} problem(s):\n" + "\n".join(errors[:15]))
-        msg = f"{len(added)} item(s) added" + (f", {len(skipped)} already existed and were skipped" if skipped else "") + "."
-        return {"message": msg, "added": len(added), "skipped": skipped[:20]}
+        msg = f"{len(added)} item(s) added"
+        if filled:
+            msg += f", {len(filled)} existing item(s) had blank details filled in"
+        if unchanged:
+            msg += f", {len(unchanged)} already existed with nothing new"
+        return {"message": msg + ".", "added": len(added), "skipped": unchanged[:20], "filled": filled[:20], "row_refs": refs}
+
+    def archive_import(self, info: dict, entries: List[dict], refs: Dict) -> int:
+        """Every source row, exactly as it was in the file, so nothing from an import is ever lost."""
+        imp = info["import_id"]
+        for e in entries:
+            ref = refs.get(e["label"], "") if e["label"] is not None else ""
+            self.t[IMPORTS].append({
+                "Archive ID": self.next_id("imparch", "IA{n:07d}"), "Import ID": imp, "File": info["file"],
+                "Sheet": e["sheet"], "Row": e["row"], "Status": e["status"], "Reason": e["reason"], "Result Ref": ref,
+                "Raw Data": json.dumps(e["raw"], ensure_ascii=False), "Stored Copy": info["stored_copy"],
+                "Imported By": info["user"], "Imported At": now_iso()})
+        self.t[IMPORTS].append({
+            "Archive ID": self.next_id("imparch", "IA{n:07d}"), "Import ID": imp, "File": info["file"], "Sheet": "",
+            "Row": "", "Status": "Mapping", "Reason": f"Column mapping used ({info['source']})",
+            "Mapping": json.dumps(info["mapping"], ensure_ascii=False), "Stored Copy": info["stored_copy"],
+            "Imported By": info["user"], "Imported At": now_iso()})
+        return len(entries)
 
     # ======================================================================
     # REPORTS / QUERIES
@@ -2060,7 +2122,7 @@ def _cell(v) -> str:
     if v is None:
         return ""
     if isinstance(v, datetime):
-        return v.date().isoformat()
+        return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) else v.replace(microsecond=0).isoformat(sep=" ")
     if isinstance(v, date):
         return v.isoformat()
     if isinstance(v, float) and v == int(v):
@@ -2068,55 +2130,469 @@ def _cell(v) -> str:
     return str(v).strip()
 
 
-def parse_import_file(raw: bytes, filename: str, kind: str):
-    """-> ([(excel_row_number, {field: text})], [ignored column names])"""
+# ---- what each target field means (shown to Gemini) -------------------------------
+IMPORT_FIELD_HELP = {
+    "stock": {
+        "product": "product / item name or description (REQUIRED unless item_code is given)",
+        "item_code": "item code / part no / SKU / material code",
+        "quantity": "quantity received or in stock on that row",
+        "invoice_qty": "quantity as per invoice / billed, only when there is ALSO a separate received-qty column",
+        "damaged_qty": "quantity received damaged",
+        "unit": "unit of measure (pcs, units, kg ...)",
+        "warehouse": "warehouse / godown / site",
+        "bin": "rack / bin / shelf / exact storage location inside the warehouse",
+        "inward_type": "CBU (imported finished units) / SKD (semi-built kits) / CKD (loose parts) / LOCAL (domestic purchase)",
+        "item_type": "FG / SUB_ASSEMBLY / PART / SPARE / PACKING / CONSUMABLE",
+        "supplier": "supplier / vendor / party the goods came from",
+        "invoice_no": "invoice / bill / challan / reference number",
+        "date": "date the goods were received (GRN / inward date)",
+        "invoice_date": "invoice / bill date",
+        "serials": "serial number(s) of the unit(s) on that row",
+        "mac": "MAC address / IMEI of the unit on that row",
+        "unit_price": "unit price / rate / cost per unit (NOT the line total / amount)",
+        "currency": "currency code",
+        "qc_status": "quality check status (PENDING / PASSED)",
+        "hsn_code": "HSN code",
+        "lot_no": "lot / batch number",
+        "mfg_date": "manufacturing date",
+        "po_no": "purchase order number",
+        "country_of_origin": "country of origin",
+        "bill_of_entry_no": "customs bill of entry number",
+        "boe_date": "bill of entry date",
+        "bl_awb_no": "bill of lading / airway bill number",
+        "container_no": "container number",
+        "port_of_entry": "port of entry",
+        "vehicle_no": "vehicle / truck number",
+        "gate_entry_no": "gate entry / gate pass number",
+        "transporter_name": "transporter / courier / carrier company",
+        "docket_no": "docket / LR / consignment / tracking number",
+        "remarks": "remarks / notes / comments",
+    },
+    "items": {
+        "item_code": "item code / part no / SKU",
+        "item_name": "item / product name or description (REQUIRED)",
+        "item_type": "FG / SUB_ASSEMBLY / PART / SPARE / PACKING / CONSUMABLE",
+        "serialized": "whether each unit has its own serial number (Y / N)",
+        "unit": "unit of measure",
+        "hsn_code": "HSN code",
+        "warranty_months": "warranty in months",
+        "category": "category / group",
+        "model": "model",
+        "variant": "variant / revision",
+        "reorder_level": "reorder level / minimum stock",
+        "remarks": "remarks / notes",
+    },
+}
+IMPORT_COLUMNS["stock"].update({
+    "mac": ["mac", "imei", "mac imei", "mac address", "mac id"],
+    "mfg_date": ["mfg date", "manufacturing date", "date of manufacture", "mfd"],
+    "boe_date": ["boe date", "bill of entry date"],
+    "port_of_entry": ["port of entry", "port"],
+    "vehicle_no": ["vehicle no", "vehicle", "vehicle number", "truck no", "lorry no"],
+    "gate_entry_no": ["gate entry no", "gate entry", "gate pass", "gate pass no"],
+})
+IMPORT_REQUIRED = {"stock": ("product", "item_code"), "items": ("item_name",)}
+IMPORT_NUMERIC = {"quantity", "invoice_qty", "damaged_qty", "unit_price", "warranty_months", "reorder_level"}
+IMPORT_DATES = {"date", "invoice_date", "boe_date", "mfg_date"}
+IMPORT_MULTI = {"serials", "remarks"}           # several columns may feed these; values are joined
+IMPORT_SKIP_SHEETS = ("instructions", "instruction", "notes", "readme", "read me", "help")
+_TOTAL_RE = re.compile(r"^\s*(grand\s*total|sub\s*-?\s*total|total)\b", re.I)
+_DATE_FORMATS = ["%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y", "%d-%b-%Y", "%d-%b-%y",
+                 "%d %b %Y", "%d %b %y", "%d %B %Y", "%d-%B-%Y", "%b %d %Y", "%b %d, %Y", "%B %d, %Y", "%Y/%m/%d",
+                 "%Y.%m.%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S"]
+
+
+def col_letter(i: int) -> str:
+    from openpyxl.utils import get_column_letter
+    return get_column_letter(i + 1)
+
+
+def col_index(letter: str) -> int:
+    from openpyxl.utils import column_index_from_string
+    return column_index_from_string(letter) - 1
+
+
+def read_grids(raw: bytes, filename: str) -> List[dict]:
+    """Every sheet of the file as a grid of text cells. Vertically merged cells are filled down
+    (so 'Supplier' merged over 10 rows is on all 10 rows)."""
     name = (filename or "").lower()
-    grid: List[list] = []
+    grids: List[dict] = []
     if name.endswith((".xlsx", ".xlsm")):
         try:
-            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            wb = load_workbook(io.BytesIO(raw), data_only=True)
         except Exception:
             raise ValueError("Could not open this Excel file. Save it as .xlsx and try again.")
-        sheets = [ws for ws in wb.worksheets if ws.title.lower() not in ("instructions", "notes", "readme")] or wb.worksheets
-        for row in sheets[0].iter_rows(values_only=True):
-            grid.append([_cell(c) for c in row])
+        for ws in wb.worksheets:
+            fill = {}
+            for mr in ws.merged_cells.ranges:
+                if mr.max_row > mr.min_row:
+                    v = ws.cell(mr.min_row, mr.min_col).value
+                    for r in range(mr.min_row + 1, mr.max_row + 1):
+                        fill[(r, mr.min_col)] = v
+            rows = []
+            for r_i, row in enumerate(ws.iter_rows(max_row=min(ws.max_row, 20000), max_col=min(ws.max_column, 80),
+                                                   values_only=True), start=1):
+                cells = [_cell(v) for v in row]
+                for (fr, fc), v in fill.items():
+                    if fr == r_i and fc - 1 < len(cells) and not cells[fc - 1]:
+                        cells[fc - 1] = _cell(v)
+                rows.append(cells)
+            grids.append({"sheet": ws.title, "hidden": ws.sheet_state != "visible", "rows": _trim(rows)})
     elif name.endswith((".csv", ".txt", ".tsv")):
         try:
             text = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = raw.decode("latin-1")
-        first = text.splitlines()[0] if text.strip() else ""
-        delim = max([",", ";", "\t"], key=first.count)
-        grid = [[_cell(c) for c in row] for row in csv.reader(io.StringIO(text), delimiter=delim)]
+        sample = "\n".join(text.splitlines()[:20])
+        delim = max([",", ";", "\t", "|"], key=sample.count)
+        rows = [[_cell(c) for c in row] for row in csv.reader(io.StringIO(text), delimiter=delim)]
+        grids.append({"sheet": "CSV", "hidden": False, "rows": _trim(rows)})
     else:
         raise ValueError("Please upload an Excel (.xlsx) or CSV file. Old .xls files: open in Excel and 'Save As' .xlsx.")
+    if not any(g["rows"] for g in grids):
+        raise ValueError("The file looks empty.")
+    return grids
 
-    hdr_i = next((i for i, r in enumerate(grid) if sum(1 for c in r if c) >= 2), None)
-    if hdr_i is None:
-        raise ValueError("The file looks empty - no header row found.")
+
+def _trim(rows: List[list]) -> List[list]:
+    while rows and not any(rows[-1]):
+        rows.pop()
+    width = max((max((i + 1 for i, c in enumerate(r) if c), default=0) for r in rows), default=0)
+    return [(r + [""] * width)[:width] for r in rows]
+
+
+def _blank_sheet_map(g: dict, use: bool, reason: str = "") -> dict:
+    return {"sheet": g["sheet"], "use": use, "reason": reason, "header_row": 0, "data_start_row": 1,
+            "columns": {}, "constants": {}}
+
+
+def alias_mapping(grids: List[dict], kind: str):
+    """The old, name-based mapping. Returns (mapping, perfect) - perfect = the file follows the template,
+    so there is nothing for Gemini to work out."""
     amap = {}
     for field, names in IMPORT_COLUMNS[kind].items():
         for n in names:
             amap.setdefault(n, field)
-    col_field, ignored = {}, []
-    for ci, h in enumerate(grid[hdr_i]):
-        f = amap.get(_hkey(h))
-        if f and f not in col_field.values():
-            col_field[ci] = f
-        elif h:
-            ignored.append(h)
-    required = "product" if kind == "stock" else "item_name"
-    if required not in col_field.values() and not (kind == "stock" and "item_code" in col_field.values()):
-        raise ValueError(f"Could not find a '{'Product' if kind == 'stock' else 'Item Name'}' column. "
-                         f"Download the template to see the expected column names.")
-    out = []
-    for i in range(hdr_i + 1, len(grid)):
-        r = grid[i]
-        rec = {f: (r[ci] if ci < len(r) else "") for ci, f in col_field.items()}
-        if any(v for v in rec.values()):
-            out.append((i + 1, rec))
-    return out, ignored
+    sheets, usable, perfect = [], 0, True
+    for g in grids:
+        if not g["rows"] or g["sheet"].strip().lower() in IMPORT_SKIP_SHEETS:
+            sheets.append(_blank_sheet_map(g, False, "empty" if not g["rows"] else "instructions sheet"))
+            continue
+        hdr_i = next((i for i, r in enumerate(g["rows"]) if sum(1 for c in r if c) >= 2), None)
+        if hdr_i is None:
+            sheets.append(_blank_sheet_map(g, False, "no heading row found"))
+            continue
+        cols, used = {}, set()
+        for ci, h in enumerate(g["rows"][hdr_i]):
+            f = amap.get(_hkey(h))
+            if f and f not in used:
+                used.add(f)
+            elif h:
+                f = ""
+                perfect = False
+            else:
+                continue
+            cols[col_letter(ci)] = {"field": f or "", "fill_down": False, "date_format": ""}
+        ok = any(f in used for f in IMPORT_REQUIRED[kind])
+        usable += ok
+        if hdr_i != 0 or not ok:
+            perfect = False
+        sheets.append({"sheet": g["sheet"], "use": ok, "reason": "" if ok else "no product / item name column recognised",
+                       "header_row": hdr_i + 1, "data_start_row": hdr_i + 2, "columns": cols, "constants": {}})
+    return {"source": "template", "sheets": sheets, "value_maps": {}, "notes": ""}, perfect and usable == 1
 
+
+def sanitize_mapping(m, grids: List[dict], kind: str, source: str) -> dict:
+    """Never trust a mapping (from Gemini or from the browser): keep only known sheets, columns and fields."""
+    if not isinstance(m, dict):
+        raise ValueError("The column mapping is not valid.")
+    fields = set(IMPORT_FIELD_HELP[kind])
+    by_name = {g["sheet"]: g for g in grids}
+    seen, sheets = set(), []
+    for sm in m.get("sheets") or []:
+        if not isinstance(sm, dict) or sm.get("sheet") not in by_name or sm.get("sheet") in seen:
+            continue
+        g = by_name[sm["sheet"]]
+        seen.add(g["sheet"])
+        n = len(g["rows"])
+        width = len(g["rows"][0]) if g["rows"] else 0
+        try:
+            hr = max(0, min(int(sm.get("header_row") or 0), n))
+        except (TypeError, ValueError):
+            hr = 0
+        try:
+            ds = int(sm.get("data_start_row") or hr + 1)
+        except (TypeError, ValueError):
+            ds = hr + 1
+        ds = max(hr + 1, min(ds, n + 1))
+        cols = {}
+        for L, c in (sm.get("columns") or {}).items():
+            L = s(L).upper()
+            if not re.fullmatch(r"[A-Z]{1,3}", L) or col_index(L) >= width:
+                continue
+            c = c if isinstance(c, dict) else {"field": c}
+            f = s(c.get("field"))
+            df = s(c.get("date_format"))
+            cols[L] = {"field": f if f in fields else "", "fill_down": bool(c.get("fill_down")),
+                       "date_format": df if (len(df) <= 40 and "%" in df) else ""}
+        for ci in range(width):         # every column that has anything in it is listed (unmapped -> Remarks)
+            L = col_letter(ci)
+            if L not in cols and any(r[ci] for r in g["rows"][max(hr - 1, 0):]):
+                cols[L] = {"field": "", "fill_down": False, "date_format": ""}
+        consts = {k: s(v) for k, v in (sm.get("constants") or {}).items()
+                  if k in fields and k not in IMPORT_MULTI and s(v) and s(v).lower() not in ("null", "none")}
+        sheets.append({"sheet": g["sheet"], "use": bool(sm.get("use", True)) and bool(g["rows"]),
+                       "reason": s(sm.get("reason"))[:200], "header_row": hr, "data_start_row": ds,
+                       "columns": dict(sorted(cols.items(), key=lambda kv: col_index(kv[0]))), "constants": consts})
+    for g in grids:
+        if g["sheet"] not in seen:
+            sheets.append(_blank_sheet_map(g, False, "not a data sheet" if g["rows"] else "empty"))
+    vmaps = {}
+    for f, mp in (m.get("value_maps") or {}).items():
+        if f in fields and isinstance(mp, dict):
+            vmaps[f] = {norm(k): s(v) for k, v in mp.items() if s(k) and s(v) and s(v).lower() not in ("null", "none")}
+    return {"source": source, "sheets": sheets, "value_maps": vmaps, "notes": s(m.get("notes"))[:1000]}
+
+
+IMPORT_PROMPT = """You map messy spreadsheets onto the import format of a factory inventory system at {company}.
+You only decide WHERE the data is. Python then copies every value itself, so never retype or summarise data rows.
+
+Import kind: {kind} - {kind_desc}
+Target fields (use these exact keys):
+{fields}
+
+Return ONLY JSON:
+{{"sheets":[{{"sheet":"<exact sheet name>","use":true,"reason":"<why, if use is false>",
+   "header_row":<row number of the column headings; 0 if the table has no heading row>,
+   "data_start_row":<row number of the first data row>,
+   "columns":{{"<column letter>":{{"field":"<target key or null>","fill_down":false,"date_format":null}}}},
+   "constants":{{"<target key>":"<value written once above / beside the table, e.g. 'Supplier: ABC Ltd' in a title row>"}}}}],
+ "value_maps":{{"warehouse":{{"<value as written in the file>":"<one of: {warehouses}>"}},
+   "inward_type":{{"<value>":"CBU|SKD|CKD|LOCAL"}}, "qc_status":{{"<value>":"PENDING|PASSED"}},
+   "item_type":{{"<value>":"FG|SUB_ASSEMBLY|PART|SPARE|PACKING|CONSUMABLE"}}, "serialized":{{"<value>":"Y|N"}},
+   "currency":{{"<value>":"<ISO code>"}}}},
+ "notes":"<short, plain-English points the user should double-check>"}}
+
+RULES
+- List EVERY column letter that has a heading or data. field null = not one of the target fields; such columns are kept
+  in Remarks, nothing is lost, so prefer null over a doubtful match.
+- Use a target field for only one column, except "serials" (e.g. Serial 1, Serial 2 columns) and "remarks".
+- If the heading spans two rows, header_row is the lower one. Unit rows / sub-headings under the heading are skipped by
+  setting data_start_row past them.
+- fill_down=true only for grouping columns (invoice no, supplier, date, warehouse ...) that are written on the first row of a
+  group and left blank on the following rows of the same group.
+- date_format: Python strptime format of TEXT dates in that column, e.g. "%d/%m/%Y", "%d-%b-%y", "%d.%m.%Y". Indian files are
+  day-first unless clearly not. null when the column holds YYYY-MM-DD dates or is not a date field.
+- quantity vs invoice_qty: with only one quantity column, map it to "quantity". Line totals / amounts are NOT unit_price.
+- value_maps: only for values listed in the column profiles that need converting; leave out values you cannot map.
+- use=false for sheets that are not {kind} data (summaries, pivots, lookup lists, instructions, empty).
+- constants: only values printed outside the table that apply to every row (title rows such as "Supplier: X", "Invoice No: Y",
+  "Date: 01/10/2026", "Godown: Bhiwandi"). Dates in constants as YYYY-MM-DD.
+"""
+
+
+def _profile(g: dict, max_rows=30, tail=5, cell_chars=80) -> dict:
+    rows = g["rows"]
+    pick = [i for i in range(len(rows)) if any(rows[i])][:max_rows]
+    tail_i = [i for i in range(len(rows)) if any(rows[i])][-tail:]
+    show = sorted(set(pick) | set(tail_i))
+    sample = [{"row": i + 1, "cells": {col_letter(ci): c[:cell_chars] for ci, c in enumerate(rows[i]) if c}} for i in show]
+    cols = {}
+    for ci in range(len(rows[0]) if rows else 0):
+        vals = [r[ci] for r in rows if r[ci]]
+        if not vals:
+            continue
+        distinct = list(dict.fromkeys(vals))
+        cols[col_letter(ci)] = {"filled_rows": len(vals), "distinct": len(distinct),
+                                "values" if len(distinct) <= 40 else "examples": [v[:60] for v in distinct[:40 if len(distinct) <= 40 else 6]]}
+    return {"sheet": g["sheet"], "hidden": g["hidden"], "total_rows": len(rows), "sample_rows": sample, "column_profiles": cols}
+
+
+def gemini_mapping(grids: List[dict], kind: str) -> dict:
+    kind_desc = ("stock being received / opening stock, usually one row per product (or one row per serial number)"
+                 if kind == "stock" else "the product / item master list, one row per item")
+    fields = "\n".join(f"- {k}: {v}" for k, v in IMPORT_FIELD_HELP[kind].items())
+    profiles = [_profile(g) for g in grids[:8] if g["rows"]]
+    blob = json.dumps(profiles, ensure_ascii=False)
+    if len(blob) > 90000:                        # very wide files: send fewer sample rows
+        profiles = [_profile(g, max_rows=12, tail=3, cell_chars=40) for g in grids[:8] if g["rows"]]
+        blob = json.dumps(profiles, ensure_ascii=False)[:120000]
+    prompt = IMPORT_PROMPT.format(company=OWN_COMPANY_NAME, kind=kind, kind_desc=kind_desc, fields=fields,
+                                  warehouses=", ".join(WAREHOUSES))
+    m = call_gemini(prompt, [{"text": "Workbook to map (sheets with sample rows and column profiles):\n" + blob}],
+                    temperature=0.0, timeout=45)
+    return sanitize_mapping(m, grids, kind, "gemini")
+
+
+def _to_number(v: str) -> str:
+    t = s(v)
+    if not t:
+        return t
+    t2 = re.sub(r"^(rs\.?|inr|usd|₹|\$|€|£)\s*", "", t.replace(",", ""), flags=re.I)
+    m = re.fullmatch(r"([-+]?\d+(?:\.\d+)?)\s*[a-zA-Z.%/ ]{0,12}", t2.strip())
+    return m.group(1) if m else t
+
+
+def _to_date(v: str, fmt: str = "") -> str:
+    t = s(v)
+    if not t:
+        return t
+    if re.match(r"^\d{4}-\d{2}-\d{2}", t):
+        return t[:10]
+    if re.fullmatch(r"\d{5}(\.\d+)?", t) and 20000 < float(t) < 80000:          # Excel serial date stored as number
+        return (date(1899, 12, 30) + timedelta(days=int(float(t)))).isoformat()
+    for f in ([fmt] if fmt else []) + _DATE_FORMATS:
+        try:
+            return datetime.strptime(t, f).date().isoformat()
+        except ValueError:
+            continue
+    return t
+
+
+_QC_WORDS = {"ok": "PASSED", "pass": "PASSED", "passed": "PASSED", "accepted": "PASSED", "done": "PASSED", "yes": "PASSED",
+             "pending": "PENDING", "hold": "PENDING", "on hold": "PENDING", "qc pending": "PENDING", "no": "PENDING"}
+
+
+def _normalise(field: str, v: str, vmaps: dict, date_fmt: str = "") -> str:
+    v = s(v)
+    if not v:
+        return v
+    mapped = (vmaps.get(field) or {}).get(norm(v))
+    if mapped:
+        v = mapped
+    if field in IMPORT_NUMERIC:
+        return _to_number(v)
+    if field in IMPORT_DATES:
+        return _to_date(v, date_fmt)
+    if field == "warehouse":
+        for w in WAREHOUSES:
+            if w.casefold() == v.casefold():
+                return w
+        hits = [w for w in WAREHOUSES if w.casefold() in v.casefold()]
+        return hits[0] if len(hits) == 1 else v
+    if field == "inward_type":
+        u = v.upper()
+        return next((t for t in INWARD_TYPES if re.search(rf"\b{t}\b", u)), u)
+    if field == "qc_status":
+        return _QC_WORDS.get(v.lower(), v.upper())
+    if field == "item_type":
+        return re.sub(r"[\s\-]+", "_", v.upper())
+    return v
+
+
+def apply_mapping(grids: List[dict], mapping: dict, kind: str) -> dict:
+    """Turns the grids into import rows. Deterministic: same file + same mapping = same result.
+    Nothing is dropped silently: unmapped columns go to remarks, every source row goes to the archive,
+    and rows that are not imported are listed with the reason."""
+    by_name = {g["sheet"]: g for g in grids}
+    used = [sm for sm in mapping["sheets"] if sm["use"] and sm["sheet"] in by_name]
+    multi = len(used) > 1
+    vmaps = mapping.get("value_maps") or {}
+    rows, skipped, archive, view = [], [], [], []
+    req = IMPORT_REQUIRED[kind]
+    for sm in mapping["sheets"]:
+        g = by_name.get(sm["sheet"])
+        if not g:
+            continue
+        hr, ds = sm["header_row"], sm["data_start_row"]
+        hdr_cells = g["rows"][hr - 1] if hr >= 1 else []
+        labels = {}
+        for L in sm["columns"]:
+            ci = col_index(L)
+            h = hdr_cells[ci] if ci < len(hdr_cells) else ""
+            above = g["rows"][hr - 2] if hr >= 2 else []
+            if sum(1 for x in above if x) >= 3 and ci < len(above) and above[ci] and above[ci] != h:
+                h = (g["rows"][hr - 2][ci] + " " + h).strip()      # two-row heading, e.g. "Qty" over "Received"
+            labels[L] = h or f"Column {L}"
+        data_rows = g["rows"][ds - 1:] if g["rows"] else []
+        view.append({"sheet": sm["sheet"], "use": sm["use"], "reason": sm["reason"], "header_row": hr,
+                     "data_start_row": ds, "total_rows": len(g["rows"]), "constants": sm["constants"],
+                     "columns": [{"letter": L, "header": labels[L], **c,
+                                  "samples": list(dict.fromkeys(r[col_index(L)] for r in data_rows if r[col_index(L)]))[:3]}
+                                 for L, c in sm["columns"].items()]})
+        if not sm["use"]:
+            continue
+        # anything written above the table (titles, supplier / invoice lines) is archived too
+        top = {f"{col_letter(ci)}{ri + 1}": c for ri in range(0, ds - 1) for ci, c in enumerate(g["rows"][ri]) if c}
+        if top:
+            archive.append({"sheet": sm["sheet"], "row": f"1-{ds - 1}", "label": None, "status": "Sheet heading",
+                            "reason": "Text above the table" + (f"; used for: {', '.join(sm['constants'])}" if sm["constants"] else ""),
+                            "raw": top})
+        last = {}
+        hdr_set = {norm(x) for x in hdr_cells if x}
+        for ri in range(ds - 1, len(g["rows"])):
+            cells = g["rows"][ri]
+            excel_row = ri + 1
+            label = f"{sm['sheet']}!{excel_row}" if multi else excel_row
+            raw_rec = {labels.get(col_letter(ci), f"Column {col_letter(ci)}"): c for ci, c in enumerate(cells) if c}
+            if not raw_rec:
+                continue
+            filled = [c for c in cells if c]
+            if hdr_set and len(filled) >= 2 and sum(1 for c in filled if norm(c) in hdr_set) >= 0.6 * len(filled):
+                skipped.append({"row": label, "reason": "heading repeated", "text": " | ".join(filled)[:200]})
+                archive.append({"sheet": sm["sheet"], "row": excel_row, "label": label, "status": "Skipped",
+                                "reason": "heading repeated", "raw": raw_rec})
+                continue
+            rec, extras, multi_vals = {}, [], {}
+            for L, c in sm["columns"].items():
+                ci = col_index(L)
+                v = cells[ci] if ci < len(cells) else ""
+                if c["fill_down"]:
+                    if v:
+                        last[L] = v
+                    else:
+                        v = last.get(L, "")
+                if not v:
+                    continue
+                f = c["field"]
+                if not f:
+                    extras.append(f"{labels[L]}: {v}")
+                elif f in IMPORT_MULTI:
+                    multi_vals.setdefault(f, []).append(v if f == "serials" or labels[L].lower() in ("remarks", "remark", "notes")
+                                                        else f"{labels[L]}: {v}")
+                elif f in rec:
+                    extras.append(f"{labels[L]}: {v}")             # second column for the same field: kept, not lost
+                else:
+                    rec[f] = _normalise(f, v, vmaps, c["date_format"])
+            for k, v in sm["constants"].items():
+                if not rec.get(k):
+                    rec[k] = _normalise(k, v, vmaps)
+            if multi_vals.get("serials"):
+                rec["serials"] = "\n".join(multi_vals["serials"])
+            mac = rec.pop("mac", "")
+            if mac:
+                sers = parse_serials(rec.get("serials"))
+                if len(sers) == 1 and not sers[0]["mac"]:
+                    rec["serials"] = f"{sers[0]['serial']} | {mac}"
+                else:
+                    extras.append(f"MAC / IMEI: {mac}")
+            rem = multi_vals.get("remarks", []) + extras
+            if rem:
+                rec["remarks"] = "; ".join(rem)
+            name = s(rec.get(req[0])) or (s(rec.get(req[1])) if len(req) > 1 else "")
+            reason = ""
+            if not name:
+                reason = "no product name" if kind == "stock" else "no item name"
+            elif _TOTAL_RE.match(name) or (kind == "stock" and _TOTAL_RE.match(" ".join(filled[:2]))):
+                reason = "looks like a total row"
+            if reason:
+                skipped.append({"row": label, "reason": reason, "text": " | ".join(filled)[:200]})
+                archive.append({"sheet": sm["sheet"], "row": excel_row, "label": label, "status": "Skipped",
+                                "reason": reason, "raw": raw_rec})
+                continue
+            rows.append((label, rec))
+            archive.append({"sheet": sm["sheet"], "row": excel_row, "label": label, "status": "Imported",
+                            "reason": "", "raw": raw_rec})
+    kept = sorted({c["header"] for v in view if v["use"] for c in v["columns"] if not c["field"] and c["samples"]})
+    return {"rows": rows, "skipped": skipped, "archive": archive, "view": view, "kept_in_remarks": kept}
+
+
+def parse_import_file(raw: bytes, filename: str, kind: str):
+    """Kept for compatibility: name-based mapping only. -> ([(row, {field: text})], [columns kept in remarks])"""
+    grids = read_grids(raw, filename)
+    mapping, _ = alias_mapping(grids, kind)
+    res = apply_mapping(grids, mapping, kind)
+    return res["rows"], res["kept_in_remarks"]
 
 # ============================================================================
 # GEMINI
@@ -2441,37 +2917,94 @@ def import_template(kind: str = "stock"):
 
 @app.post("/api/import-data")
 def import_data(file: UploadFile = File(...), kind: str = Form("stock"), mode: str = Form("preview"),
-                default_warehouse: str = Form(""), default_inward_type: str = Form(""), entered_by: str = Form("")):
-    """mode=preview checks the whole file and saves nothing; mode=commit saves it (all or nothing)."""
+                default_warehouse: str = Form(""), default_inward_type: str = Form(""), entered_by: str = Form(""),
+                mapping: str = Form(""), use_ai: str = Form("auto")):
+    """mode=preview checks the whole file and saves nothing; mode=commit saves it (all or nothing).
+
+    Column mapping: a file that follows the template is mapped by name. Any other layout is sent to Gemini,
+    which only says WHERE things are (sheet, heading row, which column is what, values written above the table);
+    the values themselves are always copied by Python. The preview returns the mapping; the browser shows it,
+    lets the user correct it, and sends it back with mode=commit so exactly what was reviewed is imported."""
     if kind not in IMPORT_TEMPLATES:
         return {"success": False, "message": "Unknown import type."}
     raw = file.file.read()
     if len(raw) > 4 * 1024 * 1024:
         return {"success": False, "message": "Please keep the file under 4 MB (split it into parts if needed)."}
     try:
-        rows, ignored = parse_import_file(raw, file.filename, kind)
+        grids = read_grids(raw, file.filename)
     except ValueError as e:
         return {"success": False, "message": str(e)}
+
+    ai_note = ""
+    try:
+        if s(mapping):
+            mp = sanitize_mapping(json.loads(mapping), grids, kind, "user")
+        else:
+            mp, perfect = alias_mapping(grids, kind)
+            want_ai = use_ai != "never" and (use_ai == "always" or not perfect)
+            if want_ai and GEMINI_API_KEY:
+                try:
+                    mp = gemini_mapping(grids, kind)
+                except Exception as e:          # Gemini down / bad answer: fall back to name matching
+                    ai_note = f"AI column matching was not available ({str(e)[:160]}), so columns were matched by name only."
+            elif want_ai:
+                ai_note = "AI column matching is off (GEMINI_API_KEY is not set), so columns were matched by name only."
+    except (ValueError, json.JSONDecodeError) as e:
+        return {"success": False, "message": f"The column mapping could not be read: {e}"}
+
+    applied = apply_mapping(grids, mp, kind)
+    rows = applied["rows"]
+    extra = {"mapping": mp, "mapping_view": applied["view"], "mapping_source": mp["source"],
+             "skipped_rows": applied["skipped"][:200], "skipped_count": len(applied["skipped"]),
+             "kept_in_remarks": applied["kept_in_remarks"], "ai_note": ai_note, "ai_notes": mp.get("notes", ""),
+             "value_maps": mp.get("value_maps", {})}
     if not rows:
-        return {"success": False, "message": "No data rows found under the header row."}
+        what = "product" if kind == "stock" else "item name"
+        return {"success": False, **extra,
+                "message": f"No rows to import were found. Check below which column holds the {what} and that the right sheet is ticked, then check again."}
     if len(rows) > 3000:
-        return {"success": False, "message": f"{len(rows)} rows is too many for one import. Please split it into files of 3000 rows or fewer."}
+        return {"success": False, **extra,
+                "message": f"{len(rows)} rows is too many for one import. Please split it into files of 3000 rows or fewer."}
+
     dry = mode != "commit"
     user = s(entered_by) or "unknown"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", file.filename or "upload")[-80:]
+    stored = {}
+
+    def with_archive(do):
+        def fn(b: Book):
+            imp = b.next_id("import", "IMP-{n:05d}")
+            copy_path = f"{os.path.dirname(EXCEL_PATH) or 'data'}/imports/{imp}_{safe}"
+            stored.update(import_id=imp, path=copy_path)
+            res = do(b, f"{file.filename} ({imp})")
+            n = b.archive_import({"import_id": imp, "file": file.filename, "stored_copy": copy_path, "user": user,
+                                  "source": mp["source"], "mapping": mp}, applied["archive"], res.pop("row_refs", {}))
+            return {**res, "import_id": imp, "archived_rows": n}
+        return fn
+
     if kind == "stock":
         dw = ""
         if s(default_warehouse):
             try:
                 dw = warehouse_ok(default_warehouse)
             except ValueError as e:
-                return {"success": False, "message": str(e)}
-        res = run_txn("INWARD", user, lambda b: b.import_stock(rows, dw, s(default_inward_type).upper()),
+                return {"success": False, "message": str(e), **extra}
+        res = run_txn("INWARD", user, with_archive(lambda b, src: b.import_stock(rows, dw, s(default_inward_type).upper(), src)),
                       f"Import {file.filename}", dry_run=dry)
     else:
-        res = run_master(user, lambda b: b.import_items(rows), f"Import items {file.filename}", dry_run=dry)
+        res = run_master(user, with_archive(lambda b, src: b.import_items(rows)), f"Import items {file.filename}", dry_run=dry)
+    res.pop("row_refs", None)
+    if res.get("success") and not dry:
+        try:            # keep the untouched original file too
+            STORE.save_file(stored["path"], raw, f"Original import file {stored['import_id']} by {user}"[:200])
+            res["stored_copy"] = stored["path"]
+        except Exception as e:
+            res.setdefault("warnings", []).append(
+                f"The original file could not be saved as a copy ({str(e)[:120]}); every row is still kept in the 'Import Archive' sheet.")
+    res.update(extra)
     res["file_rows"] = len(rows)
-    if ignored:
-        res["ignored_columns"] = ignored
+    if dry:
+        res.pop("import_id", None)
     return res
 
 
