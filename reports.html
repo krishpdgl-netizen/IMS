@@ -155,9 +155,12 @@
                 const rows = [["Product", s["Item Name"]], ["Status", s.Status],
                     ["Where", s.Status === "In Stock" ? `${s.Warehouse} · ${s.Bin}` : ""], ["MAC / IMEI", s["MAC / IMEI"]],
                     ["Received", s["GRN No"] ? `${s["Received Date"]} · ${s["Inward Type"]} · ${g.Supplier || ""} ${g["Invoice No"] ? "(inv " + g["Invoice No"] + ")" : ""}` : s["Received Date"]],
-                    ["Bill of Entry", g["Bill of Entry No"]], ["Assembled in", s["Work Order"]], ["Fitted inside unit", s["Parent Serial"]],
+                    ["Bill of Entry", g["Bill of Entry No"]],
+                    ["Received via", [g["Transporter Name"], g["Docket No"] ? "docket " + g["Docket No"] : ""].filter(Boolean).join(" · ")],
+                    ["Assembled in", s["Work Order"]], ["Fitted inside unit", s["Parent Serial"]],
                     ["Parts inside", (r.components_serials || []).map(c => `${c["Item Name"]} ${c["Serial No"]}`).join(", ")],
-                    ["Sold to", s.Customer ? [s.Customer, s["Dispatch Doc"], s["Dispatch Date"]].filter(Boolean).join(" · ") : ""], ["Warranty until", s["Warranty Until"]]]
+                    ["Sold to", s.Customer ? [s.Customer, s["Dispatch Doc"], s["Dispatch Date"]].filter(Boolean).join(" · ") : ""],
+                    ["Sent via", [s["Transporter Name"], s["Docket No"] ? "docket " + s["Docket No"] : ""].filter(Boolean).join(" · ")], ["Warranty until", s["Warranty Until"]]]
                     .filter(x => x[1]);
                 return `<table class="data-table" style="margin-bottom:10px;"><thead><tr><th colspan="2">${esc(s["Serial No"])}</th></tr></thead>
                     <tbody>${rows.map(([k, v]) => `<tr><td style="width:180px;color:var(--ink-600)">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</tbody></table>`;
@@ -249,24 +252,76 @@
             const rows = data.transactions || [];
             if (!rows.length) { document.getElementById("txEmpty").style.display = "block"; return; }
             document.getElementById("txTable").innerHTML = `
+                <div style="overflow-x:auto;">
                 <table class="data-table">
-                    <thead><tr><th>When</th><th>Action</th><th>Product</th><th>From</th><th>To</th><th>Qty</th><th>By</th><th>Status</th></tr></thead>
+                    <thead><tr><th>When</th><th>Action</th><th>Product</th><th>From</th><th>To</th><th>Qty</th><th>Party</th><th>Doc / Ref</th><th>Transporter</th><th>Docket</th><th>By</th><th>Status</th><th></th></tr></thead>
                     <tbody>
                         ${rows.map(t => `
                             <tr>
                                 <td>${new Date(t.Timestamp).toLocaleString()}</td>
-                                <td>${t.Action}</td>
+                                <td>${esc(t.Action)}</td>
                                 <td>${esc(t.Product || "")}</td>
-                                <td>${t["From Location"] || "—"}</td>
-                                <td>${t["To Location"] || "—"}</td>
-                                <td>${t.Quantity != null ? fmtQty(t.Quantity) + " " + (t.Unit || "") : "—"}</td>
-                                <td>${t["Entered By"] || ""}</td>
-                                <td>${t.Status}</td>
+                                <td>${esc(t["From Location"] || "—")}</td>
+                                <td>${esc(t["To Location"] || "—")}</td>
+                                <td>${t.Quantity != null ? fmtQty(t.Quantity) + " " + esc(t.Unit || "") : "—"}</td>
+                                <td>${esc(t.Party || "—")}</td>
+                                <td>${esc(t["Doc No"] || t["Ref No"] || "—")}</td>
+                                <td>${esc(t["Transporter Name"] || "—")}</td>
+                                <td>${esc(t["Docket No"] || "—")}</td>
+                                <td>${esc(t["Entered By"] || "")}</td>
+                                <td>${esc(t.Status)}${t["Last Edited At"] ? ` <span title="Edited by ${esc(t["Last Edited By"])} on ${esc(new Date(t["Last Edited At"]).toLocaleString())}" style="color:var(--ink-400);cursor:help;">✎</span>` : ""}</td>
+                                <td>${t.Status === "Applied" && t["Txn Type"] !== "UNDO" ? `<button class="mini-btn light" onclick="openEdit('${esc(t["Log ID"])}')">Edit</button>` : ""}</td>
                             </tr>
                         `).join("")}
                     </tbody>
-                </table>
+                </table></div>
             `;
+        }
+
+        /* ---- edit a logged entry ---- */
+        async function openEdit(logId) {
+            let d;
+            try { d = await apiGet("/api/transaction-detail?log_id=" + encodeURIComponent(logId)); }
+            catch (e) { return showToast("Could not open this entry: " + e.message); }
+            const r = d.row, g = d.inward || {};
+            if (d.edit_mode === "none") return showToast("This entry can no longer be edited.");
+            const isIn = ["INWARD", "INWARD_DAMAGED"].includes(r["Txn Type"]);
+            const title = `Edit ${r["Ref No"] || r["Log ID"]} — ${d.action || r["Txn Type"]}`;
+            const sub = "Quantities and products can't be changed here. To correct those, use ↶ Undo last on the Assistant page (latest entry only) and log it again.";
+            const v = x => esc(x ?? "");
+            if (d.edit_mode === "remarks") {
+                return openMini(title, "Only the remarks can be edited on this kind of entry. " + sub, `
+                  <form class="form-grid" id="miniForm"><label class="wide">Remarks<input name="remarks" value="${v(r.Remarks)}"></label></form>`,
+                  async () => apiPost("/api/transactions/edit", { log_id: logId, entered_by: localStorage.getItem("userName"),
+                                changes: { remarks: document.getElementById("miniForm").remarks.value } }));
+            }
+            openMini(title, sub, `
+              <form class="form-grid" id="miniForm">
+                <label>${isIn ? "Supplier" : "Customer / party"}${d.party_required ? " *" : ""}<input name="party" value="${v(r.Party)}"></label>
+                <label>${isIn ? "Invoice no." : "Document / invoice no."}<input name="doc_no" value="${v(r["Doc No"])}"></label>
+                <label>Transporter name<input name="transporter_name" list="transporterOptions" value="${v(r["Transporter Name"])}" placeholder="e.g. Blue Dart, VRL, Gati"></label>
+                <label>Docket / LR no.<input name="docket_no" value="${v(r["Docket No"])}"></label>
+                <label class="wide">Remarks (this line only)<input name="remarks" value="${v(r.Remarks)}"></label>
+                ${isIn ? `<details class="wide more-details" style="grid-column:1/-1;"><summary>More GRN details</summary>
+                  <div class="form-grid" style="margin-top:10px;">
+                    <label>Invoice date<input name="invoice_date" type="date" value="${v(g["Invoice Date"])}"></label>
+                    <label>PO no.<input name="po_no" value="${v(g["PO No"])}"></label>
+                    <label>Bill of Entry no.<input name="bill_of_entry_no" value="${v(g["Bill of Entry No"])}"></label>
+                    <label>BL / AWB no.<input name="bl_awb_no" value="${v(g["BL / AWB No"])}"></label>
+                    <label>Container no.<input name="container_no" value="${v(g["Container No"])}"></label>
+                    <label>Vehicle no.<input name="vehicle_no" value="${v(g["Vehicle No"])}"></label>
+                  </div></details>` : ""}
+              </form>
+              <datalist id="transporterOptions"></datalist>
+              <div class="form-note">Supplier / customer, document no. and transport details are updated on every line saved together on this document${isIn ? " and on the GRN" : " and on the serial-number records"}.</div>`,
+              async () => {
+                const changes = Object.fromEntries(new FormData(document.getElementById("miniForm")).entries());
+                return apiPost("/api/transactions/edit", { log_id: logId, entered_by: localStorage.getItem("userName"), changes });
+              });
+            apiGet("/api/transporters").then(x => {
+                const dl = document.getElementById("transporterOptions");
+                if (dl) dl.innerHTML = (x.transporters || []).map(n => `<option value="${esc(n)}"></option>`).join("");
+            }).catch(() => {});
         }
 
         (async () => {
