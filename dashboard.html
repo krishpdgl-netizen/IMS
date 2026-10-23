@@ -195,7 +195,7 @@
     <!-- Import modal -->
     <div class="modal-backdrop" id="importModal" onclick="if(event.target===this)closeImportModal()">
       <div class="modal">
-        <div class="modal-head"><div><h2>Import Data</h2><p>Upload an Excel or CSV file. The whole file is checked first and nothing is saved until you confirm.</p></div><button class="modal-close" onclick="closeImportModal()">×</button></div>
+        <div class="modal-head"><div><h2>Import Data</h2><p>Upload any Excel or CSV sheet — it doesn't need to match the template. AI works out which column is which, you review it, and nothing is saved until you confirm.</p></div><button class="modal-close" onclick="closeImportModal()">×</button></div>
         <div class="form-grid">
           <label class="wide">What are you importing?
             <select id="importKind" onchange="importKindChanged()">
@@ -203,18 +203,21 @@
               <option value="items">Product list — Item Master</option>
             </select></label>
           <label data-imp="stock">Default warehouse <small style="font-weight:500">(used when a row has none)</small>
-            <select id="importWh" onchange="importReset()"><option value="">— none —</option></select></label>
+            <select id="importWh" onchange="importReset(true)"><option value="">— none —</option></select></label>
           <label data-imp="stock">Default inward type <small style="font-weight:500">(used when a row has none)</small>
-            <select id="importType" onchange="importReset()"><option value="">LOCAL</option><option>CBU</option><option>SKD</option><option>CKD</option></select></label>
+            <select id="importType" onchange="importReset(true)"><option value="">LOCAL</option><option>CBU</option><option>SKD</option><option>CKD</option></select></label>
           <label class="wide">File (.xlsx or .csv)
             <input type="file" id="importFile" accept=".xlsx,.xlsm,.csv,.txt,.tsv" onchange="importReset()"></label>
         </div>
         <p style="margin:12px 0 0;font-size:12.5px;color:var(--ink-600);">
           <a id="importTemplateLink" href="#" style="color:#0f766e;font-weight:700;">⬇ Download the template</a>
-          — it lists every column and explains how to fill it. Your own column names also work if they are close (Qty, Vendor, LR No…).</p>
+          (optional). Supplier / vendor sheets in their own layout work too: title rows, merged cells, extra columns and several sheets are handled.
+          Columns that don't match a field are kept in Remarks, and every original row is saved in the <b>Import Archive</b> sheet.</p>
         <div id="importResult" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;font-size:13px;white-space:pre-wrap;line-height:1.5;"></div>
+        <div id="importMapping" style="display:none;margin-top:12px;"></div>
         <div class="modal-actions">
           <button type="button" class="btn-secondary" onclick="closeImportModal()">Cancel</button>
+          <button type="button" class="btn-secondary" id="importAiBtn" style="display:none;" onclick="IMPORT_MAP=null;runImport('preview','always')">↻ Re-match with AI</button>
           <button type="button" class="btn-secondary" id="importCheckBtn" onclick="runImport('preview')">Check file</button>
           <button type="button" class="btn-primary-inline" id="importCommitBtn" style="display:none;" onclick="runImport('commit')">Import now</button>
         </div>
@@ -641,9 +644,30 @@
             document.getElementById("importTemplateLink").href = API_BASE + "/api/import-template?kind=" + kind;
             importReset();
         }
-        function importReset() {
+        /* The preview returns the column mapping (from the template names or from Gemini). It is shown for review,
+           can be corrected, and is sent back with "Import now" so exactly what was reviewed is imported. */
+        let IMPORT_MAP = null, IMPORT_DIRTY = false;
+        const IMPORT_FIELDS = {
+            stock: { product: "Product name", item_code: "Item code / part no", quantity: "Quantity received", invoice_qty: "Invoice quantity",
+                damaged_qty: "Damaged quantity", unit: "Unit", warehouse: "Warehouse", bin: "Rack / bin", inward_type: "Inward type (CBU/SKD/CKD/LOCAL)",
+                item_type: "Item type", supplier: "Supplier", invoice_no: "Invoice / bill no.", date: "Date received", invoice_date: "Invoice date",
+                serials: "Serial number(s)", mac: "MAC / IMEI", unit_price: "Unit price", currency: "Currency", qc_status: "QC status",
+                hsn_code: "HSN code", lot_no: "Lot / batch no.", mfg_date: "Mfg date", po_no: "PO no.", country_of_origin: "Country of origin",
+                bill_of_entry_no: "Bill of Entry no.", boe_date: "BoE date", bl_awb_no: "BL / AWB no.", container_no: "Container no.",
+                port_of_entry: "Port of entry", vehicle_no: "Vehicle no.", gate_entry_no: "Gate entry no.", transporter_name: "Transporter",
+                docket_no: "Docket / LR no.", remarks: "Remarks" },
+            items: { item_name: "Item name", item_code: "Item code", item_type: "Item type", serialized: "Serialized (Y/N)", unit: "Unit",
+                hsn_code: "HSN code", warranty_months: "Warranty (months)", category: "Category", model: "Model", variant: "Variant",
+                reorder_level: "Reorder level", remarks: "Remarks" },
+        };
+        function importReset(keepMap) {
             document.getElementById("importResult").style.display = "none";
             document.getElementById("importCommitBtn").style.display = "none";
+            if (!keepMap) {
+                IMPORT_MAP = null; IMPORT_DIRTY = false;
+                document.getElementById("importMapping").style.display = "none";
+                document.getElementById("importAiBtn").style.display = "none";
+            }
         }
         function importShow(ok, text) {
             const el = document.getElementById("importResult");
@@ -652,10 +676,61 @@
             el.style.color = ok ? "#0b3b3c" : "#991b1b";
             el.textContent = text;
         }
-        async function runImport(mode) {
+        function importRenderMapping(data) {
+            const box = document.getElementById("importMapping");
+            const kind = document.getElementById("importKind").value, F = IMPORT_FIELDS[kind];
+            const src = { gemini: "matched by AI", template: "matched by column name", user: "as you set them" }[data.mapping_source] || "";
+            const opts = sel => `<option value="">— keep in Remarks —</option>` +
+                Object.entries(F).map(([k, l]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${esc(l)}</option>`).join("");
+            const vm = Object.entries(data.value_maps || {}).flatMap(([f, m]) => Object.entries(m).map(([a, b]) => `${esc(a)} → ${esc(b)}`));
+            let h = `<div style="font-size:13px;color:var(--ink-600);margin-bottom:8px;"><b>Columns ${esc(src)}.</b> Check the “Goes into” column; change anything that's wrong, then click <b>Check file</b> again.</div>`;
+            if (data.ai_note) h += `<div class="form-note" style="color:#92400e;">⚠ ${esc(data.ai_note)}</div>`;
+            if (data.ai_notes) h += `<div class="form-note">AI note: ${esc(data.ai_notes)}</div>`;
+            (data.mapping_view || []).forEach((sv, si) => {
+                if (!sv.columns.length && !sv.use) { h += `<div class="form-note">Sheet “${esc(sv.sheet)}”: not imported${sv.reason ? " (" + esc(sv.reason) + ")" : ""}.</div>`; return; }
+                h += `<div style="border:1px solid #e5e7eb;border-radius:10px;padding:10px;margin-bottom:10px;">
+                  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:13px;margin-bottom:6px;">
+                    <label style="display:flex;gap:6px;align-items:center;font-weight:700;"><input type="checkbox" style="width:auto" data-si="${si}" data-k="use" ${sv.use ? "checked" : ""}> Sheet “${esc(sv.sheet)}”</label>
+                    <label style="display:flex;gap:6px;align-items:center;">Heading row <input type="number" min="0" style="width:70px" data-si="${si}" data-k="header_row" value="${sv.header_row}"></label>
+                    <label style="display:flex;gap:6px;align-items:center;">Data starts at row <input type="number" min="1" style="width:70px" data-si="${si}" data-k="data_start_row" value="${sv.data_start_row}"></label>
+                    ${!sv.use && sv.reason ? `<span style="color:var(--ink-400)">(${esc(sv.reason)})</span>` : ""}
+                  </div>
+                  ${Object.keys(sv.constants || {}).length ? `<div class="form-note">Taken from above the table, for every row: ${Object.entries(sv.constants).map(([k, v]) => `<b>${esc(F[k] || k)}</b> = ${esc(v)}`).join(", ")}</div>` : ""}
+                  ${sv.use ? `<div style="overflow-x:auto;"><table class="data-table" style="font-size:12.5px;">
+                    <thead><tr><th>Col</th><th>Heading in file</th><th>Example values</th><th>Goes into</th><th title="Blank cells take the value from the row above (grouped / merged cells)">Fill blanks from above</th></tr></thead>
+                    <tbody>${sv.columns.map(c => `<tr><td>${esc(c.letter)}</td><td>${esc(c.header)}</td>
+                      <td style="color:var(--ink-600)">${c.samples.map(esc).join(" · ") || "—"}</td>
+                      <td><select data-si="${si}" data-col="${esc(c.letter)}" data-k="field" style="min-width:170px">${opts(c.field)}</select></td>
+                      <td style="text-align:center"><input type="checkbox" style="width:auto" data-si="${si}" data-col="${esc(c.letter)}" data-k="fill_down" ${c.fill_down ? "checked" : ""}></td></tr>`).join("")}
+                    </tbody></table></div>` : ""}
+                </div>`;
+            });
+            if (vm.length) h += `<div class="form-note">Values converted: ${vm.slice(0, 20).join(", ")}${vm.length > 20 ? " …" : ""}</div>`;
+            if ((data.kept_in_remarks || []).length) h += `<div class="form-note">Kept in Remarks (not lost): ${data.kept_in_remarks.map(esc).join(", ")}</div>`;
+            if (data.skipped_count) h += `<details class="more-details" style="margin-top:6px;"><summary>${data.skipped_count} row(s) will not be imported as stock — still saved in the Import Archive</summary>
+                <table class="data-table" style="font-size:12.5px;margin-top:6px;"><thead><tr><th>Row</th><th>Why</th><th>Content</th></tr></thead><tbody>
+                ${data.skipped_rows.map(r => `<tr><td>${esc(r.row)}</td><td>${esc(r.reason)}</td><td>${esc(r.text)}</td></tr>`).join("")}</tbody></table></details>`;
+            box.innerHTML = h;
+            box.style.display = "block";
+            box.querySelectorAll("[data-si]").forEach(el => el.addEventListener("change", () => {
+                const sm = IMPORT_MAP.sheets.find(x => x.sheet === data.mapping_view[+el.dataset.si].sheet);
+                if (!sm) return;
+                const k = el.dataset.k;
+                if (el.dataset.col) {
+                    sm.columns[el.dataset.col] = sm.columns[el.dataset.col] || { field: "", fill_down: false, date_format: "" };
+                    sm.columns[el.dataset.col][k] = el.type === "checkbox" ? el.checked : el.value;
+                } else sm[k] = el.type === "checkbox" ? el.checked : Number(el.value || 0);
+                IMPORT_DIRTY = true;
+                importReset(true);
+                importShow(true, "Mapping changed — click “Check file” to check it again before importing.");
+            }));
+        }
+        async function runImport(mode, useAi) {
             const file = document.getElementById("importFile").files[0];
             if (!file) return importShow(false, "Choose an Excel or CSV file first.");
-            const checkBtn = document.getElementById("importCheckBtn"), goBtn = document.getElementById("importCommitBtn");
+            if (mode === "commit" && IMPORT_DIRTY) return importShow(false, "You changed the mapping — click “Check file” first.");
+            const checkBtn = document.getElementById("importCheckBtn"), goBtn = document.getElementById("importCommitBtn"),
+                  aiBtn = document.getElementById("importAiBtn");
             const fd = new FormData();
             fd.append("file", file);
             fd.append("kind", document.getElementById("importKind").value);
@@ -663,30 +738,39 @@
             fd.append("default_warehouse", document.getElementById("importWh").value);
             fd.append("default_inward_type", document.getElementById("importType").value);
             fd.append("entered_by", localStorage.getItem("userName") || "Dashboard User");
-            checkBtn.disabled = goBtn.disabled = true;
+            if (IMPORT_MAP) fd.append("mapping", JSON.stringify(IMPORT_MAP));
+            if (useAi) fd.append("use_ai", useAi);
+            checkBtn.disabled = goBtn.disabled = aiBtn.disabled = true;
             goBtn.textContent = mode === "commit" ? "Importing…" : "Import now";
-            importShow(true, mode === "commit" ? "Importing…" : "Checking the file…");
+            importShow(true, mode === "commit" ? "Importing…" : (IMPORT_MAP ? "Checking the file…" : "Reading the file and matching columns (this can take a few seconds)…"));
             try {
                 const res = await fetch(API_BASE + "/api/import-data", { method: "POST", body: fd });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || "Import failed.");
+                if (data.mapping) {
+                    IMPORT_MAP = data.mapping; IMPORT_DIRTY = false;
+                    importRenderMapping(data);
+                    aiBtn.style.display = "inline-flex";
+                }
                 if (!data.success) { goBtn.style.display = "none"; return importShow(false, data.message || "The file could not be imported."); }
                 let note = "";
                 if ((data.warnings || []).length) note += "\n\nNote: " + data.warnings.join(" ");
-                if ((data.ignored_columns || []).length) note += "\n\nColumns not recognised and ignored: " + data.ignored_columns.join(", ");
                 if (mode === "preview") {
-                    importShow(true, "✓ File is OK — " + data.message + "\nNothing has been saved yet. Click “Import now” to save it." + note);
+                    importShow(true, "✓ File is OK — " + data.message + (data.skipped_count ? ` (${data.skipped_count} other row(s) listed below)` : "") +
+                        "\nNothing has been saved yet. Check the columns below, then click “Import now”." + note);
                     goBtn.style.display = "inline-flex";
                 } else {
                     closeImportModal();
-                    showToast("Imported: " + data.message);
+                    showToast("Imported: " + data.message + (data.import_id ? ` (${data.import_id}, original rows in Import Archive)` : ""));
+                    if ((data.warnings || []).length) setTimeout(() => showToast(data.warnings.join(" ")), 3600);
+                    importReset();
                     productMasterLoaded = false; loadProductMaster(true); loadTransporters(true);
                     await loadCards(); await loadLocationChart(); await loadAgingList();
                 }
             } catch (err) {
                 goBtn.style.display = "none";
                 importShow(false, err.message);
-            } finally { checkBtn.disabled = goBtn.disabled = false; }
+            } finally { checkBtn.disabled = goBtn.disabled = aiBtn.disabled = false; }
         }
         function showToast(message) {
           const t=document.createElement("div"); t.className="toast"; t.textContent="✓ "+message; document.body.appendChild(t);
