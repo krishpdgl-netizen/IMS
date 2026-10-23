@@ -52,9 +52,10 @@ import requests
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+import csv
 
 
 # ============================================================================
@@ -112,6 +113,16 @@ OUTWARD_TYPES = {
 }
 MOVABLE_ZONES = ["RAW_STORE", "FG_STORE", "QUARANTINE"]   # zones a manual transfer may touch
 
+# ---- Which logged entries can be edited afterwards, and how -------------------
+INWARD_TXN_TYPES = {"INWARD", "INWARD_DAMAGED"}
+OUTWARD_TXN_TYPES = {"DISPATCH", "SAMPLE", "RTV", "SCRAP"}
+DOC_TXN_TYPES = INWARD_TXN_TYPES | OUTWARD_TXN_TYPES | {"TRANSFER", "SALES_RETURN"}   # party / doc / transport editable
+PARTY_REQUIRED = INWARD_TXN_TYPES | {"DISPATCH", "SAMPLE", "RTV", "SALES_RETURN"}
+# GRN header fields that may be corrected after the fact: request key -> Inwards column
+INWARD_EDITABLE = {"party": "Supplier", "doc_no": "Invoice No", "invoice_date": "Invoice Date", "po_no": "PO No",
+                   "bill_of_entry_no": "Bill of Entry No", "bl_awb_no": "BL / AWB No", "container_no": "Container No",
+                   "vehicle_no": "Vehicle No", "transporter_name": "Transporter Name", "docket_no": "Docket No"}
+
 # ---- Sheet layout -------------------------------------------------------------
 ITEMS, BOM, INWARDS, LINES, BATCHES, SERIALS = "Items", "BOM", "Inwards", "Inward Lines", "Batches", "Serials"
 WOS, CONS, LOG, META, JOURNAL = "Work Orders", "Consumption", "Transaction Log", "_Meta", "_Journal"
@@ -125,7 +136,7 @@ SCHEMA = {
     INWARDS: ("GRN No", ["GRN No", "Inward Type", "GRN Date", "Warehouse", "Supplier", "Country of Origin",
                          "PO No", "Invoice No", "Invoice Date", "Currency", "Exchange Rate", "Invoice Value",
                          "BL / AWB No", "Container No", "Bill of Entry No", "BoE Date", "Port of Entry",
-                         "Vehicle No", "Gate Entry No", "Kit For Item", "Kits Count", "Kit Check",
+                         "Vehicle No", "Gate Entry No", "Transporter Name", "Docket No", "Kit For Item", "Kits Count", "Kit Check",
                          "QC Status", "Total Lines", "Total Accepted", "Total Short", "Total Damaged",
                          "Received By", "Status", "Remarks", "Source Document", "Txn ID", "Created At"]),
     LINES: ("Line ID", ["Line ID", "GRN No", "Item Code", "Item Name", "Item Type", "HSN Code",
@@ -139,7 +150,7 @@ SCHEMA = {
     SERIALS: ("Serial Key", ["Serial Key", "Serial No", "Item Code", "Item Name", "MAC / IMEI", "Batch ID",
                              "GRN No", "Inward Type", "Warehouse", "Zone", "Bin", "Status", "QC Status",
                              "Work Order", "Parent Serial", "Customer", "Dispatch Doc", "Dispatch Date",
-                             "Warranty Until", "Received Date", "Updated At"]),
+                             "Transporter Name", "Docket No", "Warranty Until", "Received Date", "Updated At"]),
     WOS: ("WO No", ["WO No", "FG Item Code", "FG Item Name", "Build Type", "Planned Qty", "Produced Qty",
                     "Rejected Qty", "Production Line", "Warehouse", "Status", "Start Date", "Target Date",
                     "Completed Date", "Source GRN", "Created By", "Remarks", "Txn ID", "Created At"]),
@@ -147,7 +158,8 @@ SCHEMA = {
                        "Component Name", "Qty", "Unit", "From Batch ID", "GRN No", "Component Serials"]),
     LOG: ("Log ID", ["Log ID", "Txn ID", "Timestamp", "Txn Type", "Ref No", "Item Code", "Item Name", "Qty",
                      "Unit", "From Warehouse", "From Zone", "To Warehouse", "To Zone", "Bin", "Serials",
-                     "Party", "Doc No", "Entered By", "Status", "Message", "Remarks"]),
+                     "Party", "Doc No", "Transporter Name", "Docket No", "Entered By", "Status", "Message", "Remarks",
+                     "Last Edited By", "Last Edited At"]),
     META: ("Key", ["Key", "Value"]),
     JOURNAL: ("Seq", ["Seq", "Txn ID", "Op", "Sheet", "Row Key", "Column", "Old Value"]),
 }
@@ -603,6 +615,7 @@ class Book:
             "From Warehouse": f.get("from_wh", ""), "From Zone": f.get("from_zone", ""),
             "To Warehouse": f.get("to_wh", ""), "To Zone": f.get("to_zone", ""), "Bin": f.get("bin", ""),
             "Serials": ", ".join(f.get("serials") or []), "Party": f.get("party", ""), "Doc No": f.get("doc", ""),
+            "Transporter Name": f.get("transporter", ""), "Docket No": f.get("docket", ""),
             "Entered By": tx["user"], "Status": "Applied", "Message": f.get("message", ""),
             "Remarks": f.get("remarks", ""),
         })
@@ -1006,6 +1019,8 @@ class Book:
         if not lines:
             raise ValueError("Add at least one item line.")
         currency = s(d.get("currency")) or ("INR" if itype == "LOCAL" else "USD")
+        transporter = s(d.get("transporter_name"))
+        docket = s(d.get("docket_no"))
 
         grn = self.next_id(f"grn{datetime.now(IST).year}", "GRN-{y}-{n:04d}")
         txn = self.txn["id"]
@@ -1057,7 +1072,7 @@ class Book:
                 self.new_serials(item, serials, batch)
                 self.log(type="INWARD", ref=grn, item_code=item["Item Code"], item_name=item["Item Name"], qty=acc_q,
                          unit=item["Unit"], to_wh=wh, to_zone=zone, bin=bin_, serials=[x["serial"] for x in serials],
-                         party=supplier, doc=inv_no, message=f"{itype} inward",
+                         party=supplier, doc=inv_no, transporter=transporter, docket=docket, message=f"{itype} inward",
                          remarks=(f"Short {clean(short_q)}" if short_q else "") + (f" Excess {clean(excess_q)}" if excess_q else ""))
             if dmg_q > 0:
                 dbatch = self.add_batch(item, wh, "QUARANTINE", s(l.get("damaged_bin")) or "QUARANTINE", dmg_q, grn_date,
@@ -1067,7 +1082,7 @@ class Book:
                 self.log(type="INWARD_DAMAGED", ref=grn, item_code=item["Item Code"], item_name=item["Item Name"],
                          qty=dmg_q, unit=item["Unit"], to_wh=wh, to_zone="QUARANTINE", bin=dbatch["Bin"],
                          serials=[x["serial"] for x in dserials], party=supplier, doc=inv_no,
-                         message="Received damaged", remarks=s(l.get("remarks")))
+                         transporter=transporter, docket=docket, message="Received damaged", remarks=s(l.get("remarks")))
             self.t[LINES].append({
                 "Line ID": line_id, "GRN No": grn, "Item Code": item["Item Code"], "Item Name": item["Item Name"],
                 "Item Type": item["Item Type"], "HSN Code": s(l.get("hsn_code")) or item["HSN Code"],
@@ -1099,6 +1114,7 @@ class Book:
             "Bill of Entry No": s(d.get("bill_of_entry_no")), "BoE Date": valid_date(d.get("boe_date"), "BoE date"),
             "Port of Entry": s(d.get("port_of_entry")), "Vehicle No": s(d.get("vehicle_no")),
             "Gate Entry No": s(d.get("gate_entry_no")),
+            "Transporter Name": transporter, "Docket No": docket,
             "Kit For Item": (self.find_item(kit_for) or {}).get("Item Name", kit_for) if kit_for else "",
             "Kits Count": kits or "", "Kit Check": kit["status"] if kit else "",
             "QC Status": "PENDING" if any_pending else "PASSED", "Total Lines": len(line_results),
@@ -1205,6 +1221,8 @@ class Book:
         lines = [l for l in (d.get("lines") or []) if s(l.get("item")) or s(l.get("item_code"))]
         if not lines:
             raise ValueError("Add at least one item to dispatch.")
+        transporter = s(d.get("transporter_name"))
+        docket = s(d.get("docket_no"))
         msgs = []
         for l in lines:
             item = self.item(l.get("item_code") or l.get("item"))
@@ -1218,6 +1236,7 @@ class Book:
             wmonths = int(num(item["Warranty Months"], 0))
             for x in sn:
                 ch = {"Status": cfg["serial_status"], "Customer": party, "Dispatch Doc": doc, "Dispatch Date": ddate,
+                      "Transporter Name": transporter, "Docket No": docket,
                       "Zone": "", "Bin": "", "Updated At": now_iso()}
                 if otype == "SALE" and wmonths:
                     ch["Warranty Until"] = add_months(parse_d(ddate), wmonths).isoformat()
@@ -1225,11 +1244,12 @@ class Book:
             fz = sorted({a["batch"]["Zone"] for a in allocs})
             self.log(type=otype if otype != "SALE" else "DISPATCH", ref=doc, item_code=item["Item Code"],
                      item_name=item["Item Name"], qty=qty, unit=item["Unit"], from_wh=wh, from_zone="/".join(fz),
-                     serials=sn, party=party, doc=doc, remarks=s(d.get("remarks")) or s(d.get("address")),
-                     message=cfg["label"])
+                     serials=sn, party=party, doc=doc, transporter=transporter, docket=docket,
+                     remarks=s(d.get("remarks")) or s(d.get("address")), message=cfg["label"])
             oldest = allocs[0]["batch"]["Date Received"] if allocs else ""
             msgs.append(f"{clean(qty)} {item['Unit']} {item['Item Name']} (oldest stock from {oldest})")
-        return {"message": f"{cfg['label']}{' ' + doc if doc else ''} to {party or '-'}: " + "; ".join(msgs) + "."}
+        ship = (f" Sent via {transporter}" if transporter else "") + (f", docket {docket}" if docket else "")
+        return {"message": f"{cfg['label']}{' ' + doc if doc else ''} to {party or '-'}: " + "; ".join(msgs) + "." + ship}
 
     # ======================================================================
     # TRANSFER between warehouses / zones / bins
@@ -1252,7 +1272,8 @@ class Book:
         sn = [x for a in allocs for x in a["serials"]]
         self.log(type="TRANSFER", ref=s(d.get("doc_no")), item_code=item["Item Code"], item_name=item["Item Name"],
                  qty=qty, unit=item["Unit"], from_wh=fw, from_zone=fz, to_wh=tw, to_zone=tz, bin=tbin, serials=sn,
-                 doc=s(d.get("doc_no")), remarks=s(d.get("remarks")) or s(d.get("vehicle_no")))
+                 doc=s(d.get("doc_no")), transporter=s(d.get("transporter_name")), docket=s(d.get("docket_no")),
+                 remarks=s(d.get("remarks")) or s(d.get("vehicle_no")))
         return {"message": f"Moved {clean(qty)} {item['Unit']} {item['Item Name']} from {fw}/{fz} to {tw}/{tz} bin {tbin} "
                            f"(original receipt dates kept for aging)."}
 
@@ -1607,6 +1628,200 @@ class Book:
         return {"message": f"{w['WO No']} closed ({clean(num(w['Produced Qty']))} produced, {clean(num(w['Rejected Qty']))} rejected)."}
 
     # ======================================================================
+    # EDIT a logged entry (details only - never quantities / products)
+    # ======================================================================
+    def transaction_detail(self, log_id) -> dict:
+        row = self.t[LOG].get(log_id)
+        if not row:
+            raise ValueError("Transaction not found.")
+        ttype = row["Txn Type"]
+        mode = "none"
+        if row["Status"] == "Applied" and ttype != "UNDO":
+            mode = "full" if ttype in DOC_TXN_TYPES else "remarks"
+        inward = self.t[INWARDS].get(row["Ref No"]) if ttype in INWARD_TXN_TYPES and row["Ref No"] else None
+        return {"row": row, "inward": inward, "edit_mode": mode, "party_required": ttype in PARTY_REQUIRED}
+
+    def edit_transaction(self, d: dict, user: str) -> dict:
+        log = self.t[LOG]
+        row = log.get(d.get("log_id"))
+        if not row:
+            raise ValueError("Transaction not found.")
+        if row["Status"] != "Applied":
+            raise ValueError(f"This entry is {row['Status']}, so it can no longer be edited.")
+        ttype = row["Txn Type"]
+        if ttype == "UNDO":
+            raise ValueError("An undo entry cannot be edited.")
+        ch = d.get("changes") or {}
+        stamp = {"Last Edited By": s(user) or "unknown", "Last Edited At": now_iso()}
+
+        if ttype not in DOC_TXN_TYPES:
+            if "remarks" not in ch:
+                raise ValueError("Only the remarks can be edited on this kind of entry.")
+            log.update(row["Log ID"], {"Remarks": s(ch.get("remarks")), **stamp})
+            return {"message": "Remarks updated."}
+
+        old_party, old_doc = s(row["Party"]), s(row["Doc No"])
+        new_party = s(ch["party"]) if "party" in ch else old_party
+        new_doc = s(ch["doc_no"]) if "doc_no" in ch else old_doc
+        if ttype in PARTY_REQUIRED and not new_party:
+            raise ValueError("Supplier / customer name cannot be empty.")
+        if ttype == "SALES_RETURN" and not new_doc:
+            raise ValueError("The return document number cannot be empty.")
+
+        # every line that was saved together as one document
+        fam = INWARD_TXN_TYPES if ttype in INWARD_TXN_TYPES else {ttype}
+        sibs = [r for r in log.rows() if r["Txn ID"] == row["Txn ID"] and r["Status"] == "Applied" and r["Txn Type"] in fam
+                and s(r["Ref No"]) == s(row["Ref No"]) and s(r["Party"]) == old_party and s(r["Doc No"]) == old_doc]
+        if not any(r["Log ID"] == row["Log ID"] for r in sibs):
+            sibs.append(row)
+
+        # ---- GRN header (inward) -------------------------------------------------------
+        if ttype in INWARD_TXN_TYPES:
+            g = self.t[INWARDS].get(row["Ref No"])
+            if g:
+                if (new_party != old_party or new_doc != old_doc) and new_doc:
+                    for o in self.t[INWARDS].rows():
+                        if (o["GRN No"] != g["GRN No"] and o["Status"] != "Reversed"
+                                and norm(o["Supplier"]) == norm(new_party) and norm(o["Invoice No"]) == norm(new_doc)):
+                            raise ValueError(f"Invoice {new_doc} from {new_party} is already recorded on {o['GRN No']}.")
+                hdr = {}
+                for k, col in INWARD_EDITABLE.items():
+                    if k in ch:
+                        hdr[col] = valid_date(ch[k], "Invoice date") if k == "invoice_date" else s(ch[k])
+                self.t[INWARDS].update(g["GRN No"], hdr)
+
+        # ---- serial records (outward) ---------------------------------------------------
+        sc = 0
+        if ttype in OUTWARD_TXN_TYPES:
+            for r in sibs:
+                for sn in [x.strip() for x in s(r["Serials"]).split(",") if x.strip()]:
+                    rec = self.t[SERIALS].get(serial_key(r["Item Code"], sn))
+                    if rec and s(rec["Customer"]) == old_party and s(rec["Dispatch Doc"]) == old_doc:
+                        upd = {"Customer": new_party, "Dispatch Doc": new_doc, "Updated At": now_iso()}
+                        if "transporter_name" in ch:
+                            upd["Transporter Name"] = s(ch["transporter_name"])
+                        if "docket_no" in ch:
+                            upd["Docket No"] = s(ch["docket_no"])
+                        self.t[SERIALS].update(serial_key(r["Item Code"], sn), upd)
+                        sc += 1
+
+        # ---- the log rows themselves ----------------------------------------------------
+        for r in sibs:
+            upd = {"Party": new_party, "Doc No": new_doc, **stamp}
+            if ttype not in INWARD_TXN_TYPES and s(r["Ref No"]) == old_doc:
+                upd["Ref No"] = new_doc          # for outward / transfer the reference IS the document no.
+            if "transporter_name" in ch:
+                upd["Transporter Name"] = s(ch["transporter_name"])
+            if "docket_no" in ch:
+                upd["Docket No"] = s(ch["docket_no"])
+            if r["Log ID"] == row["Log ID"] and "remarks" in ch:
+                upd["Remarks"] = s(ch["remarks"])
+            log.update(r["Log ID"], upd)
+        what = s(row["Ref No"]) or new_doc or row["Log ID"]
+        return {"message": f"{what} updated ({len(sibs)} line{'s' if len(sibs) != 1 else ''}"
+                           + (f", {sc} serial record{'s' if sc != 1 else ''}" if sc else "") + ")."}
+
+    # ======================================================================
+    # DATA IMPORT (Excel / CSV)
+    # ======================================================================
+    def import_stock(self, rows: List[tuple], default_wh="", default_type="") -> dict:
+        errors: List[str] = []
+        groups: Dict[tuple, dict] = {}
+        for rn, r in rows:
+            try:
+                product = s(r.get("product")) or s(r.get("item_code"))
+                if not product:
+                    raise ValueError("product name is missing")
+                sers_raw = r.get("serials")
+                n_ser = len(parse_serials(sers_raw))
+                qty = num(r.get("quantity"), 0)
+                if qty <= 0 and n_ser:
+                    qty = n_ser
+                if qty <= 0:
+                    raise ValueError(f"quantity is missing for '{product}'")
+                wh_raw = s(r.get("warehouse")) or s(default_wh)
+                if not wh_raw:
+                    raise ValueError(f"warehouse is blank (use one of: {', '.join(WAREHOUSES)})")
+                wh = warehouse_ok(wh_raw)
+                itype = (s(r.get("inward_type")) or s(default_type) or "LOCAL").upper()
+                if itype not in INWARD_TYPES:
+                    raise ValueError(f"inward type '{itype}' must be one of CBU, SKD, CKD, LOCAL")
+                qc = (s(r.get("qc_status")) or "PASSED").upper()
+                if qc not in ("PENDING", "PASSED"):
+                    raise ValueError("QC status must be PENDING or PASSED")
+                date_ = valid_date(r.get("date") or today(), "Date")
+                supplier = s(r.get("supplier")) or "Opening Stock"
+                inv = s(r.get("invoice_no"))
+                trn, dkt = s(r.get("transporter_name")), s(r.get("docket_no"))
+            except ValueError as e:
+                errors.append(f"Row {rn}: {e}")
+                continue
+            gk = (wh, itype, norm(supplier), norm(inv), date_, qc, norm(trn), norm(dkt))
+            g = groups.setdefault(gk, {"hdr": {
+                "inward_type": itype, "warehouse": wh, "supplier": supplier, "invoice_no": inv, "grn_date": date_,
+                "qc_status": qc, "transporter_name": trn, "docket_no": dkt, "invoice_date": s(r.get("invoice_date")),
+                "po_no": s(r.get("po_no")), "currency": s(r.get("currency")), "country_of_origin": s(r.get("country_of_origin")),
+                "bill_of_entry_no": s(r.get("bill_of_entry_no")), "bl_awb_no": s(r.get("bl_awb_no")),
+                "container_no": s(r.get("container_no"))}, "lines": {}, "rows": []})
+            g["rows"].append(rn)
+            lk = (norm(s(r.get("item_code")) or product), norm(r.get("bin")), s(r.get("unit_price")), norm(r.get("lot_no")))
+            ln = g["lines"].get(lk)
+            inv_q = num(r.get("invoice_qty"), 0) or qty
+            if ln is None:
+                g["lines"][lk] = {"item": product, "item_code": s(r.get("item_code")), "invoice_qty": inv_q, "received_qty": qty,
+                                  "damaged_qty": num(r.get("damaged_qty"), 0), "bin": s(r.get("bin")), "serials": s(sers_raw),
+                                  "unit": s(r.get("unit")), "unit_price": s(r.get("unit_price")), "item_type": s(r.get("item_type")),
+                                  "hsn_code": s(r.get("hsn_code")), "lot_no": s(r.get("lot_no")), "remarks": s(r.get("remarks"))}
+            else:       # same product + bin on another row (e.g. one row per serial) -> merge into one line
+                ln["invoice_qty"] += inv_q
+                ln["received_qty"] += qty
+                ln["damaged_qty"] += num(r.get("damaged_qty"), 0)
+                if s(sers_raw):
+                    ln["serials"] = (ln["serials"] + "\n" + s(sers_raw)).strip()
+
+        def span(rs):
+            return f"Row {rs[0]}" if len(rs) == 1 else (f"Rows {', '.join(map(str, rs))}" if len(rs) <= 4 else f"Rows {min(rs)}-{max(rs)}")
+
+        grns, n_rows, no_inv = [], 0, 0
+        for g in groups.values():
+            body = {**g["hdr"], "lines": list(g["lines"].values())}
+            if not g["hdr"]["invoice_no"]:
+                no_inv += 1
+            try:
+                res = self.inward(body)
+                grns.append(res["grn_no"])
+                n_rows += len(g["rows"])
+            except ValueError as e:
+                who = g["hdr"]["supplier"] + (f" / inv {g['hdr']['invoice_no']}" if g["hdr"]["invoice_no"] else "")
+                errors.append(f"{span(g['rows'])} ({who}): {e}")
+        if errors:
+            more = f"\n...and {len(errors) - 15} more problem(s)." if len(errors) > 15 else ""
+            raise ValueError(f"Nothing was imported - {len(errors)} problem(s) found in the file:\n" + "\n".join(errors[:15]) + more)
+        if no_inv:
+            self.warnings.append(f"{no_inv} group(s) have no invoice number, so importing the same file twice cannot be detected.")
+        shown = ", ".join(grns[:6]) + (" ..." if len(grns) > 6 else "")
+        return {"message": f"{n_rows} row(s) -> {len(grns)} GRN(s) ({shown}).", "rows": n_rows, "grns": grns}
+
+    def import_items(self, rows: List[tuple]) -> dict:
+        added, skipped, errors = [], [], []
+        for rn, r in rows:
+            name = s(r.get("item_name"))
+            if not name:
+                errors.append(f"Row {rn}: item name is missing")
+                continue
+            if self.find_item(name) or (s(r.get("item_code")) and self.find_item(r.get("item_code"))):
+                skipped.append(name)
+                continue
+            try:
+                added.append(self.create_item({**r, "item_type": s(r.get("item_type")) or "PART"})["Item Code"])
+            except ValueError as e:
+                errors.append(f"Row {rn}: {e}")
+        if errors:
+            raise ValueError(f"Nothing was imported - {len(errors)} problem(s):\n" + "\n".join(errors[:15]))
+        msg = f"{len(added)} item(s) added" + (f", {len(skipped)} already existed and were skipped" if skipped else "") + "."
+        return {"message": msg, "added": len(added), "skipped": skipped[:20]}
+
+    # ======================================================================
     # REPORTS / QUERIES
     # ======================================================================
     def stock_summary(self, item_filter=None) -> List[dict]:
@@ -1740,8 +1955,8 @@ def run_txn(txn_type: str, user: str, fn, commit_msg: str, dry_run=False) -> dic
     raise HTTPException(409, "Someone else saved at the same moment and the retry also clashed. Please try again.")
 
 
-def run_master(user: str, fn, commit_msg: str) -> dict:
-    """Master data edits (items / BOM): saved, but not part of the undo chain."""
+def run_master(user: str, fn, commit_msg: str, dry_run=False) -> dict:
+    """Master data edits (items / BOM / transaction details): saved, but not part of the undo chain."""
     for attempt in range(3):
         raw, sha = STORE.load()
         book = Book.from_bytes(raw)
@@ -1750,6 +1965,8 @@ def run_master(user: str, fn, commit_msg: str) -> dict:
             result = fn(book) or {}
         except ValueError as e:
             return {"success": False, "message": str(e)}
+        if dry_run:
+            return {"success": True, "dry_run": True, "warnings": book.warnings, **result}
         try:
             STORE.save(book.to_bytes(), sha, f"{commit_msg} by {user}"[:200])
             _read_cache.update(sha=None, book=None)
@@ -1757,6 +1974,148 @@ def run_master(user: str, fn, commit_msg: str) -> dict:
         except Conflict:
             continue
     raise HTTPException(409, "Someone else saved at the same moment. Please try again.")
+
+
+# ============================================================================
+# IMPORT FILE PARSING (.xlsx / .csv -> rows keyed by canonical field names)
+# ============================================================================
+IMPORT_COLUMNS = {
+    "stock": {
+        "product": ["product", "product name", "item", "item name", "description", "item description", "model", "material"],
+        "item_code": ["item code", "code", "part no", "part number", "sku", "material code"],
+        "quantity": ["quantity", "qty", "received qty", "received quantity", "stock", "opening stock", "opening qty", "qty received"],
+        "invoice_qty": ["invoice qty", "invoice quantity"],
+        "damaged_qty": ["damaged qty", "damaged", "damaged quantity"],
+        "unit": ["unit", "uom", "unit of measure"],
+        "warehouse": ["warehouse", "location", "godown", "site", "warehouse location"],
+        "bin": ["bin", "storage location", "exact storage", "exact storage location", "rack", "shelf", "storage", "rack bin"],
+        "inward_type": ["inward type", "type of inward", "type", "cbu skd ckd", "cbu skd ckd local", "inward"],
+        "item_type": ["item type", "product type"],
+        "supplier": ["supplier", "supplier name", "vendor", "vendor name", "party", "received from"],
+        "invoice_no": ["invoice no", "invoice number", "invoice", "bill no", "bill number", "reference", "reference no", "ref no", "challan no", "dc no"],
+        "date": ["date", "date received", "received date", "grn date", "inward date", "date of receipt"],
+        "invoice_date": ["invoice date", "bill date"],
+        "serials": ["serial", "serials", "serial no", "serial number", "serial numbers", "serial number s", "serial nos"],
+        "unit_price": ["unit price", "price", "rate", "cost", "unit cost"],
+        "currency": ["currency"],
+        "qc_status": ["qc status", "qc"],
+        "hsn_code": ["hsn", "hsn code"],
+        "lot_no": ["lot", "lot no", "batch no", "batch"],
+        "po_no": ["po no", "po number", "po"],
+        "country_of_origin": ["country of origin", "country", "origin"],
+        "bill_of_entry_no": ["bill of entry no", "bill of entry", "boe no", "boe"],
+        "bl_awb_no": ["bl awb no", "bl awb", "awb no", "awb", "bl no", "bl"],
+        "container_no": ["container no", "container"],
+        "transporter_name": ["transporter", "transporter name", "transport", "transport name", "courier", "courier name", "carrier"],
+        "docket_no": ["docket", "docket no", "docket number", "lr no", "lr number", "lr docket", "lr docket no", "tracking no", "consignment no"],
+        "remarks": ["remarks", "remark", "notes", "comments"],
+    },
+    "items": {
+        "item_code": ["item code", "code", "part no", "part number", "sku"],
+        "item_name": ["item name", "name", "product", "product name", "description"],
+        "item_type": ["item type", "type", "product type"],
+        "serialized": ["serialized", "serialised", "serial", "tracked by serial"],
+        "unit": ["unit", "uom"],
+        "hsn_code": ["hsn", "hsn code"],
+        "warranty_months": ["warranty", "warranty months", "warranty mo", "warranty in months"],
+        "category": ["category"],
+        "model": ["model"],
+        "variant": ["variant", "revision", "variant revision"],
+        "reorder_level": ["reorder level", "reorder", "min stock", "minimum stock"],
+        "remarks": ["remarks", "remark", "notes"],
+    },
+}
+IMPORT_TEMPLATES = {
+    "stock": {
+        "headers": ["Product", "Quantity", "Warehouse", "Storage Location", "Inward Type", "Supplier", "Invoice No", "Date Received",
+                    "Serial Numbers", "Unit", "Unit Price", "Currency", "QC Status", "Transporter Name", "Docket No", "Remarks"],
+        "examples": [["Panache 43in Smart TV", 2, "Bhiwandi", "Rack A3", "CBU", "Shenzhen Vision Electronics", "INV-1001", "2026-10-01",
+                      "TV001, TV002", "units", 185, "USD", "PASSED", "Blue Dart", "DK123456", ""],
+                     ["Screw M3", 500, "Ghatkopar", "Bin 12", "LOCAL", "Local Hardware Co", "LH-552", "2026-10-02",
+                      "", "pcs", 0.4, "INR", "PASSED", "VRL Logistics", "LR-98765", ""]],
+        "notes": ["One row per product per shipment. Rows with the same Warehouse + Inward Type + Supplier + Invoice No + Date become ONE GRN.",
+                  "Warehouse must match one of: " + ", ".join(WAREHOUSES) + " (or choose a default warehouse on the import screen).",
+                  "Inward Type: CBU, SKD, CKD or LOCAL (blank = the default you choose, else LOCAL).",
+                  "Storage Location (rack / bin) is required for every row.",
+                  "Serialized products: list one serial per unit in Serial Numbers (comma or new-line separated), count must equal Quantity.",
+                  "Date format: YYYY-MM-DD (Excel dates also work). Old dates are kept, so aging reports stay correct.",
+                  "Supplier blank = 'Opening Stock'. QC Status blank = PASSED.",
+                  "Products that do not exist yet are created automatically."],
+    },
+    "items": {
+        "headers": ["Item Code", "Item Name", "Item Type", "Serialized", "Unit", "HSN Code", "Warranty Months", "Category", "Model", "Reorder Level"],
+        "examples": [["", "Panache 43in Smart TV", "FG", "Y", "units", "85287217", 12, "TV", "P43", 10],
+                     ["MB-43-V2", "Main Board 43in V2", "PART", "N", "pcs", "85299090", 0, "", "", ""]],
+        "notes": ["Item Type: " + ", ".join(ITEM_TYPES) + " (blank = PART).", "Serialized: Y or N.",
+                  "Item Code blank = auto-generated. Items whose name or code already exists are skipped."],
+    },
+}
+
+
+def _hkey(h) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", s(h).lower()).strip()
+
+
+def _cell(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v).strip()
+
+
+def parse_import_file(raw: bytes, filename: str, kind: str):
+    """-> ([(excel_row_number, {field: text})], [ignored column names])"""
+    name = (filename or "").lower()
+    grid: List[list] = []
+    if name.endswith((".xlsx", ".xlsm")):
+        try:
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        except Exception:
+            raise ValueError("Could not open this Excel file. Save it as .xlsx and try again.")
+        sheets = [ws for ws in wb.worksheets if ws.title.lower() not in ("instructions", "notes", "readme")] or wb.worksheets
+        for row in sheets[0].iter_rows(values_only=True):
+            grid.append([_cell(c) for c in row])
+    elif name.endswith((".csv", ".txt", ".tsv")):
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        first = text.splitlines()[0] if text.strip() else ""
+        delim = max([",", ";", "\t"], key=first.count)
+        grid = [[_cell(c) for c in row] for row in csv.reader(io.StringIO(text), delimiter=delim)]
+    else:
+        raise ValueError("Please upload an Excel (.xlsx) or CSV file. Old .xls files: open in Excel and 'Save As' .xlsx.")
+
+    hdr_i = next((i for i, r in enumerate(grid) if sum(1 for c in r if c) >= 2), None)
+    if hdr_i is None:
+        raise ValueError("The file looks empty - no header row found.")
+    amap = {}
+    for field, names in IMPORT_COLUMNS[kind].items():
+        for n in names:
+            amap.setdefault(n, field)
+    col_field, ignored = {}, []
+    for ci, h in enumerate(grid[hdr_i]):
+        f = amap.get(_hkey(h))
+        if f and f not in col_field.values():
+            col_field[ci] = f
+        elif h:
+            ignored.append(h)
+    required = "product" if kind == "stock" else "item_name"
+    if required not in col_field.values() and not (kind == "stock" and "item_code" in col_field.values()):
+        raise ValueError(f"Could not find a '{'Product' if kind == 'stock' else 'Item Name'}' column. "
+                         f"Download the template to see the expected column names.")
+    out = []
+    for i in range(hdr_i + 1, len(grid)):
+        r = grid[i]
+        rec = {f: (r[ci] if ci < len(r) else "") for ci, f in col_field.items()}
+        if any(v for v in rec.values()):
+            out.append((i + 1, rec))
+    return out, ignored
 
 
 # ============================================================================
@@ -1794,6 +2153,7 @@ Return ONLY one JSON object, one of:
   "item":"<item name or code>", "qty":<number>, "serials":["..."],
   "warehouse":"<warehouse>",            // DISPATCH, ADJUST
   "party":"<customer>", "doc_no":"<invoice/challan no>",   // DISPATCH
+  "transporter_name":"<transport / courier company>", "docket_no":"<docket / LR / consignment no>",   // DISPATCH or RECEIVE, only if stated
   "from_warehouse":"..","to_warehouse":"..","to_bin":"..", // TRANSFER
   "zone":"RAW_STORE"|"FG_STORE"|"QUARANTINE",             // optional
   "bin":"..",                            // ADJUST with positive qty
@@ -1835,6 +2195,7 @@ Return ONLY JSON:
  "currency": null, "invoice_value": null,
  "bl_awb_no": null, "container_no": null, "bill_of_entry_no": null, "boe_date": null, "port_of_entry": null,
  "vehicle_no": null, "delivery_address": null,
+ "transporter_name": null, "docket_no": null,   // transport / courier company and the LR / docket / consignment no. if printed
  "items": [{{"item_name": "", "item_code": "part no / model if printed", "hsn_code": null,
              "qty": 0, "unit": "pcs", "unit_price": null, "serials": ["only if printed"]}}],
  "confidence_notes": "what was unclear"
@@ -2022,6 +2383,98 @@ def undo(d: dict = None):
     raise HTTPException(409, "Could not save the undo, please try again.")
 
 
+@app.get("/api/transporters")
+def transporters():
+    """Transporter names used so far (for the type-ahead list, so the same company isn't spelled three ways)."""
+    seen: Dict[str, str] = {}
+    for r in read_book().t[LOG].rows():
+        n = s(r["Transporter Name"])
+        if n and norm(n) not in seen:
+            seen[norm(n)] = n
+    return {"transporters": sorted(seen.values(), key=str.lower)}
+
+
+# ---- edit a logged entry -----------------------------------------------------
+@app.get("/api/transaction-detail")
+def transaction_detail(log_id: str):
+    try:
+        d = read_book().transaction_detail(log_id)
+        return {"success": True, **d, "action": ACTION_LABEL.get(d["row"]["Txn Type"], d["row"]["Txn Type"])}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/transactions/edit")
+def edit_transaction(d: dict):
+    user = _user(d)
+    return run_master(user, lambda b: b.edit_transaction(d, user), f"Edit {s(d.get('log_id'))}")
+
+
+# ---- data import (Excel / CSV) -----------------------------------------------
+@app.get("/api/import-template")
+def import_template(kind: str = "stock"):
+    if kind not in IMPORT_TEMPLATES:
+        raise HTTPException(400, "kind must be 'stock' or 'items'")
+    cfg = IMPORT_TEMPLATES[kind]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Import"
+    ws.append(cfg["headers"])
+    for c in ws[1]:
+        c.font, c.fill, c.alignment = _HEADER_FONT, _HEADER_FILL, Alignment(horizontal="center")
+    for ex in cfg["examples"]:
+        ws.append(ex)
+    for i in range(1, len(cfg["headers"]) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = 20
+    ws.freeze_panes = "A2"
+    ns = wb.create_sheet("Instructions")
+    ns.column_dimensions["A"].width = 120
+    ns.append(["How to fill this sheet (delete the two example rows before importing)"])
+    ns["A1"].font = Font(bold=True, size=12)
+    for n in cfg["notes"]:
+        ns.append([n])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return StreamingResponse(io.BytesIO(buf.getvalue()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename=import_template_{kind}.xlsx"})
+
+
+@app.post("/api/import-data")
+def import_data(file: UploadFile = File(...), kind: str = Form("stock"), mode: str = Form("preview"),
+                default_warehouse: str = Form(""), default_inward_type: str = Form(""), entered_by: str = Form("")):
+    """mode=preview checks the whole file and saves nothing; mode=commit saves it (all or nothing)."""
+    if kind not in IMPORT_TEMPLATES:
+        return {"success": False, "message": "Unknown import type."}
+    raw = file.file.read()
+    if len(raw) > 4 * 1024 * 1024:
+        return {"success": False, "message": "Please keep the file under 4 MB (split it into parts if needed)."}
+    try:
+        rows, ignored = parse_import_file(raw, file.filename, kind)
+    except ValueError as e:
+        return {"success": False, "message": str(e)}
+    if not rows:
+        return {"success": False, "message": "No data rows found under the header row."}
+    if len(rows) > 3000:
+        return {"success": False, "message": f"{len(rows)} rows is too many for one import. Please split it into files of 3000 rows or fewer."}
+    dry = mode != "commit"
+    user = s(entered_by) or "unknown"
+    if kind == "stock":
+        dw = ""
+        if s(default_warehouse):
+            try:
+                dw = warehouse_ok(default_warehouse)
+            except ValueError as e:
+                return {"success": False, "message": str(e)}
+        res = run_txn("INWARD", user, lambda b: b.import_stock(rows, dw, s(default_inward_type).upper()),
+                      f"Import {file.filename}", dry_run=dry)
+    else:
+        res = run_master(user, lambda b: b.import_items(rows), f"Import items {file.filename}", dry_run=dry)
+    res["file_rows"] = len(rows)
+    if ignored:
+        res["ignored_columns"] = ignored
+    return res
+
+
 # ---- reads -------------------------------------------------------------------
 @app.get("/api/stock")
 def stock(item: str = ""):
@@ -2201,11 +2654,13 @@ def handle_chat(b: Book, p: dict, msg: str, user: str) -> dict:
                 return {"success": False, "message": "Is this a CBU, SKD, CKD or local inward? Please say which (e.g. 'received 20 CKD kits of …')."}
             body = {"inward_type": it, "warehouse": p.get("warehouse"), "supplier": p.get("supplier") or "Not specified",
                     "invoice_no": p.get("invoice_no"), "qc_status": "PASSED",
+                    "transporter_name": p.get("transporter_name"), "docket_no": p.get("docket_no"),
                     "lines": [{"item": p.get("item"), "invoice_qty": p.get("qty"), "bin": p.get("storage_location") or p.get("bin"),
                                "serials": sers}]}
             return run_txn("INWARD", user, lambda bk: bk.inward(body), f"Chat inward: {msg[:60]}")
         if a == "DISPATCH":
             body = {"outward_type": "SALE", "warehouse": p.get("warehouse"), "party": p.get("party"), "doc_no": p.get("doc_no"),
+                    "transporter_name": p.get("transporter_name"), "docket_no": p.get("docket_no"),
                     "lines": [{"item": p.get("item"), "qty": p.get("qty"), "serials": sers, "zone": p.get("zone")}]}
             return run_txn("DISPATCH", user, lambda bk: bk.dispatch(body), f"Chat dispatch: {msg[:60]}")
         if a == "TRANSFER":
@@ -2373,6 +2828,7 @@ def _simple_body(d: dict) -> tuple:
             "container_no": d.get("container_no"), "country_of_origin": d.get("country_of_origin"), "po_no": d.get("po_no"),
             "currency": d.get("currency"), "kit_for_item": d.get("kit_for_item"), "kits_count": d.get("kits_count"),
             "remarks": d.get("delivery_address"), "source_document": d.get("source_document"),
+            "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no"),
             "lines": [{"item": d.get("product"), "invoice_qty": d.get("invoice_qty") or d.get("quantity"),
                        "received_qty": d.get("quantity"), "damaged_qty": d.get("damaged_qty"), "bin": d.get("storage_location"),
                        "serials": d.get("serial_number"), "damaged_serials": d.get("damaged_serials"),
@@ -2381,12 +2837,13 @@ def _simple_body(d: dict) -> tuple:
         return "DISPATCH", lambda b: b.dispatch({
             "outward_type": d.get("outward_type") or "SALE", "warehouse": d.get("location"), "party": d.get("party"),
             "doc_no": d.get("reference_no"), "date": d.get("date_received"), "address": d.get("delivery_address"),
+            "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no"),
             "lines": [{"item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number")}]})
     if a == "TRANSFER":
         return "TRANSFER", lambda b: b.transfer({
             "item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number"),
             "from_warehouse": d.get("from_location"), "to_warehouse": d.get("to_location"), "to_bin": d.get("storage_location"),
-            "doc_no": d.get("reference_no")})
+            "doc_no": d.get("reference_no"), "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no")})
     if a == "ADJUST":
         return "ADJUST", lambda b: b.adjust({
             "item": d.get("product"), "qty": d.get("quantity"), "serials": d.get("serial_number"), "warehouse": d.get("location"),
@@ -2425,6 +2882,7 @@ def log_document(d: dict):
                               "bill_of_entry_no": d.get("bill_of_entry_no"), "bl_awb_no": d.get("bl_awb_no"),
                               "container_no": d.get("container_no"), "country_of_origin": d.get("country_of_origin"),
                               "currency": d.get("currency"), "source_document": d.get("source_document"),
+                              "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no"),
                               "lines": [{"item": l.get("product"), "invoice_qty": l.get("quantity"), "bin": l.get("storage_location"),
                                          "serials": l.get("serial_number"), "unit": l.get("unit"), "unit_price": l.get("unit_price")}
                                         for l in lines]})
@@ -2432,6 +2890,7 @@ def log_document(d: dict):
             elif act == "DISPATCH":
                 r = b.dispatch({"outward_type": "SALE", "warehouse": wh, "party": d.get("party_name"),
                                 "doc_no": d.get("document_number"), "address": d.get("delivery_address"),
+                                "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no"),
                                 "lines": [{"item": l.get("product"), "qty": l.get("quantity"), "serials": l.get("serial_number")}
                                           for l in lines]})
                 msgs.append(r["message"])
@@ -2439,7 +2898,8 @@ def log_document(d: dict):
                 for l in lines:
                     msgs.append(b.transfer({"item": l.get("product"), "qty": l.get("quantity"), "serials": l.get("serial_number"),
                                             "from_warehouse": wh, "to_warehouse": l.get("to_location"),
-                                            "to_bin": l.get("storage_location"), "doc_no": d.get("document_number")})["message"])
+                                            "to_bin": l.get("storage_location"), "doc_no": d.get("document_number"),
+                                            "transporter_name": d.get("transporter_name"), "docket_no": d.get("docket_no")})["message"])
         return {"message": " ".join(msgs)}
     return _with_warnings(run_txn("INWARD", _user(d), fn, f"Scanned {s(d.get('document_number'))}"))
 
